@@ -1,0 +1,12 @@
+# 3D U-Net model configuration
+model: unet3d
+
+architecture:
+  in_channels: 1
+  # Set to match the dataset num_classes at runtime
+  out_channels: null
+  # Number of feature maps at each encoder depth [d0, d1, d2, d3, d4]
+  features: [32, 64, 128, 256, 320]
+  norm: batch         # batch | instance
+  activation: relu
+  upsample_mode: trilinear   # trilinear | transposed_conv

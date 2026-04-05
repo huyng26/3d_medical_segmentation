@@ -1,0 +1,36 @@
+# BTCV (Synapse) dataset configuration
+dataset: btcv
+
+paths:
+  raw_dir: data/raw/btcv
+  processed_dir: data/processed/btcv
+
+# 13 foreground classes (1-indexed); 0 = background
+num_classes: 14
+label_names:
+  0: background
+  1: aorta
+  2: gallbladder
+  3: spleen
+  4: left_kidney
+  5: right_kidney
+  6: liver
+  7: stomach
+  8: aorta_v2
+  9: inferior_vena_cava
+  10: portal_vein
+  11: pancreas
+  12: right_adrenal_gland
+  13: left_adrenal_gland
+
+preprocessing:
+  hu_clip_min: -175
+  hu_clip_max: 250
+  # Target voxel spacing in mm (x, y, z)
+  target_spacing: [1.5, 1.5, 2.0]
+  normalize: zscore   # clip then z-score
+
+splits:
+  train_list: data/raw/btcv/train.txt
+  val_list: data/raw/btcv/val.txt
+  test_list: data/raw/btcv/test.txt

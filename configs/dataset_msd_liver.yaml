@@ -1,0 +1,24 @@
+# MSD Task03 — Liver segmentation configuration
+dataset: msd_liver
+msd_task: Task03_Liver
+
+paths:
+  raw_dir: data/raw/msd/Task03_Liver
+  processed_dir: data/processed/msd/Task03_Liver
+
+# 0 = background, 1 = liver, 2 = tumour
+num_classes: 3
+label_names:
+  0: background
+  1: liver
+  2: tumour
+
+preprocessing:
+  hu_clip_min: -175
+  hu_clip_max: 250
+  target_spacing: [1.5, 1.5, 2.0]
+  normalize: zscore
+
+splits:
+  # MSD ships its own train/test JSON; path relative to raw_dir
+  json_list: dataset.json

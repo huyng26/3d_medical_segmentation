@@ -1,0 +1,35 @@
+# Default training hyperparameters (Phase 4)
+
+patch_size: [128, 128, 64]
+batch_size: 2
+num_workers: 4
+
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+
+scheduler:
+  name: cosine_annealing
+  T_max: 500    # epochs
+  eta_min: 1.0e-6
+
+loss:
+  dice_weight: 0.5
+  ce_weight: 0.5
+
+training:
+  max_epochs: 500
+  val_interval: 10      # validate every N epochs
+  amp: true             # mixed precision (torch.cuda.amp)
+  grad_checkpoint: false   # override per-model in model_*.yaml
+
+checkpointing:
+  save_dir: outputs/checkpoints
+  save_top_k: 3          # keep best 3 by val DSC
+  monitor: val_dsc_mean
+
+logging:
+  backend: wandb         # wandb | tensorboard | both
+  project: 3d_medical_segmentation
+  log_interval: 10       # log every N steps

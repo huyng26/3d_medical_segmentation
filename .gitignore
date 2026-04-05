@@ -1,0 +1,32 @@
+# Data — never commit raw or processed medical volumes
+data/
+
+# Training outputs
+outputs/
+runs/
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp

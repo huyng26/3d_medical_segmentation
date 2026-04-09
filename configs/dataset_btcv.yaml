@@ -32,5 +32,4 @@ preprocessing:
 
 splits:
   train_list: data/raw/btcv/train.txt
-  val_list: data/raw/btcv/val.txt
   test_list: data/raw/btcv/test.txt

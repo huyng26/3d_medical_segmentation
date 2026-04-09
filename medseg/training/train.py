@@ -3,11 +3,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from monai.metrics import DiceMetric
+from monai.losses import DiceLoss
 
-
-def build_optimizer(model, cfg: dict):
-    """Return an AdamW optimiser configured from ``cfg``."""
-    raise NotImplementedError
 
 
 def build_scheduler(optimizer, cfg: dict):

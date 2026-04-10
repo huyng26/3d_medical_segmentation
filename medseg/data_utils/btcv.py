@@ -13,7 +13,7 @@ def build_btcv_dataloader(args,mode: str = "train"):
     train_labels = sorted(glob.glob(os.path.join(data_path, "labelsTr", "*.nii.gz")))
     test_images = sorted(glob.glob(os.path.join(data_path, "imagesTs", "*.nii.gz")))
     test_labels = sorted(glob.glob(os.path.join(data_path, "labelsTs", "*.nii.gz")))
-
+    print(train_images)
     train_files = [{"image": image, "label": label} for image, label in zip(train_images, train_labels)]
     test_files = [{"image": image, "label": label} for image, label in zip(test_images, test_labels)]
     
@@ -31,7 +31,11 @@ def build_btcv_dataloader(args,mode: str = "train"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build BTCV Dataloader")
-    parser.add_argument("--data_path", type=str, default="../../data/BTCV", help="Path to BTCV data")
+    _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    parser.add_argument("--data_path", type=str, default=os.path.join(_project_root, "data", "BTCV"), help="Path to BTCV data")
     args = parser.parse_args()
     train_loader = build_btcv_dataloader(args, mode="train")
-    print(train_loader)
+    for batch_data in train_loader:
+        image, labels = batch_data["image"], batch_data["label"]
+        print(image.shape)
+        print(labels.shape)

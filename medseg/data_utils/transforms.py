@@ -29,10 +29,6 @@ def build_btcv_train_transforms():
     - Random intensity scaling
     - Gaussian noise
 
-    Args:
-        patch_size: Spatial size of the extracted 3-D patch (D, H, W).
-        intensity_scale: Standard deviation for intensity scaling jitter.
-
     Returns:
         monai.transforms.Compose
     """
@@ -118,6 +114,7 @@ def build_msd_train_transforms():
     [
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys=["image", "label"]),
+        Spacingd(keys=["image", "label"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear", "nearest")),
         ScaleIntensityRanged(
             keys=["image"],
             a_min=-57,
@@ -128,7 +125,6 @@ def build_msd_train_transforms():
         ),
         CropForegroundd(keys=["image", "label"], source_key="image", allow_smaller=True),
         Orientationd(keys=["image", "label"], axcodes="RAS"),
-        Spacingd(keys=["image", "label"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear", "nearest")),
         RandCropByPosNegLabeld(
             keys=["image", "label"],
             label_key="label",
@@ -139,6 +135,31 @@ def build_msd_train_transforms():
             image_key="image",
             image_threshold=0,
         ),
+        RandFlipd(
+            keys=["image", "label"],
+            spatial_axis=[0],
+            prob=0.10,
+        ),
+        RandFlipd(
+            keys=["image", "label"],
+            spatial_axis=[1],
+            prob=0.10,
+        ),
+        RandFlipd(
+            keys=["image", "label"],
+            spatial_axis=[2],
+            prob=0.10,
+        ),
+        RandRotate90d(
+            keys=["image", "label"],
+            prob=0.10,
+            max_k=3,
+        ),
+        RandShiftIntensityd(
+            keys=["image"],
+            offsets=0.10,
+            prob=0.50,
+        ),
     ]
 )
     return train_transforms
@@ -148,6 +169,7 @@ def build_msd_test_transforms():
     [
         LoadImaged(keys=["image", "label"]),
         EnsureChannelFirstd(keys=["image", "label"]),
+        Spacingd(keys=["image", "label"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear", "nearest")),
         ScaleIntensityRanged(
             keys=["image"],
             a_min=-57,
@@ -158,7 +180,6 @@ def build_msd_test_transforms():
         ),
         CropForegroundd(keys=["image", "label"], source_key="image", allow_smaller=True),
         Orientationd(keys=["image", "label"], axcodes="RAS"),
-        Spacingd(keys=["image", "label"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear", "nearest")),
     ]
     )
     return val_transforms
@@ -182,6 +203,11 @@ def build_inference_transforms():
         CropForegroundd(keys=["image"], source_key="image", allow_smaller=True),
     ]
     )
+    
+    return test_org_transforms
+
+def build_postprocess_transforms():
+    test_org_transforms = build_inference_transforms()
     post_transforms = Compose(
     [
         Invertd(
@@ -198,4 +224,4 @@ def build_inference_transforms():
         SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir="../out", output_postfix="seg", resample=False),
     ]
     )
-    return test_org_transforms, post_transforms
+    return post_transforms

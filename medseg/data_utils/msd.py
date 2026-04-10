@@ -2,7 +2,7 @@ import os
 import glob
 from monai.data import CacheDataset, DataLoader, Dataset, decollate_batch
 import argparse
-from transforms import build_msd_train_transforms, build_msd_test_transforms
+from .transforms import build_msd_train_transforms, build_msd_test_transforms
 
 def build_msd_dataloader(args,mode: str = "train", task: int = 2):
     data_path = args.data_path
@@ -35,7 +35,8 @@ def build_msd_dataloader(args,mode: str = "train", task: int = 2):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build MSD Dataloader")
-    parser.add_argument("--data_path", type=str, default="../../data/MSD", help="Path to MSD data")
+    _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    parser.add_argument("--data_path", type=str, default=os.path.join(_project_root, "data", "MSD"), help="Path to MSD data")
     args = parser.parse_args()
-    train_loader = build_msd_dataloader(args, mode="train")
+    train_loader = build_msd_dataloader(args, mode="train", task = 2)
     print(train_loader)

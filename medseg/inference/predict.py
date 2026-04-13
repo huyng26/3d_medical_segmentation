@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-
+from data_utils.transforms import build_inference_transforms, build_postprocess_transforms
 
 def predict_volume(
     model: torch.nn.Module,
@@ -49,7 +49,7 @@ def postprocess(
     Returns:
         Integer label map of shape (1, D, H, W).
     """
-    raise NotImplementedError
+    return build_postprocess_transforms()
 
 
 def load_checkpoint(checkpoint_path: str | Path, model: torch.nn.Module, device) -> torch.nn.Module:

@@ -1,10 +1,7 @@
 # BTCV (Synapse) dataset configuration
 dataset: btcv
 
-paths:
-  raw_dir: data/raw/btcv
-  processed_dir: data/processed/btcv
-
+data_path: data/BTCV
 # 13 foreground classes (1-indexed); 0 = background
 num_classes: 14
 label_names:
@@ -31,5 +28,5 @@ preprocessing:
   normalize: zscore   # clip then z-score
 
 splits:
-  train_list: data/raw/btcv/train.txt
-  test_list: data/raw/btcv/test.txt
+  train_list: data/BTCV/train.txt
+  test_list: data/BTCV/test.txt

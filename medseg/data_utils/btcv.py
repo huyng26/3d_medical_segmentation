@@ -2,7 +2,7 @@ import os
 import glob
 from monai.data import CacheDataset, DataLoader, Dataset, decollate_batch
 import argparse
-from transforms import build_btcv_train_transforms, build_btcv_test_transforms
+from .transforms import build_btcv_train_transforms, build_btcv_test_transforms
 
 def build_btcv_dataloader(args,mode: str = "train"):
     data_path = args.data_path

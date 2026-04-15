@@ -10,7 +10,6 @@ from monai.networks.blocks.mlp import MLPBlock
 import torch
 import torch.nn as nn
 from monai.utils import ensure_tuple_rep
-from monai.networks.nets.swin_unetr import SwinTransformer as SwinViT 
 from monai.networks.nets.swin_unetr import SwinUNETR
 import torch.nn.functional as F
 
@@ -39,10 +38,10 @@ class PatchEmbed(nn.Module):
         norm_layer=nn.LayerNorm, 
     ):
         super().__init__()
-        self.patch_size = patch_size 
+        self.patch_size = ensure_tuple_rep(patch_size, 2)
         self.in_channs = in_channs
         self.embed_dim = embed_dims 
-        self.patch_embed = nn.Conv2d(
+        self.proj = nn.Conv2d(
             in_channels=in_channs,
             out_channels=embed_dims, 
             kernel_size=patch_size,
@@ -54,10 +53,34 @@ class PatchEmbed(nn.Module):
         self.norm = norm_layer(embed_dims)
 
     def forward(self, x: torch.Tensor):
-        x = self.patch_embed(x)
-        x = x.flatten(2).transpose(1, 2)
-        x = x + self.pos_embed(self.position_ids)
-        x = self.norm(x)
+        x_shape = x.size()
+        if len(x_shape) == 5:
+            _, _, d, h, w = x_shape
+            if w % self.patch_size[2] != 0:
+                x = F.pad(x, (0, self.patch_size[2] - w % self.patch_size[2]))
+            if h % self.patch_size[1] != 0:
+                x = F.pad(x, (0, 0, 0, self.patch_size[1] - h % self.patch_size[1]))
+            if d % self.patch_size[0] != 0:
+                x = F.pad(x, (0, 0, 0, 0, 0, self.patch_size[0] - d % self.patch_size[0]))
+
+        elif len(x_shape) == 4:
+            _, _, h, w = x_shape
+            if w % self.patch_size[1] != 0:
+                x = F.pad(x, (0, self.patch_size[1] - w % self.patch_size[1]))
+            if h % self.patch_size[0] != 0:
+                x = F.pad(x, (0, 0, 0, self.patch_size[0] - h % self.patch_size[0]))
+
+        x = self.proj(x)
+        if self.norm is not None:
+            x_shape = x.size()
+            x = x.flatten(2).transpose(1, 2)
+            x = self.norm(x)
+            if len(x_shape) == 5:
+                d, wh, ww = x_shape[2], x_shape[3], x_shape[4]
+                x = x.transpose(1, 2).view(-1, self.embed_dim, d, wh, ww)
+            elif len(x_shape) == 4:
+                wh, ww = x_shape[2], x_shape[3]
+                x = x.transpose(1, 2).view(-1, self.embed_dim, wh, ww)
         return x
 
 class MLP(nn.Module):
@@ -66,6 +89,7 @@ class MLP(nn.Module):
         in_features:int, 
         out_features:int,
         hidden_features:int,
+        act_layer:nn.Module = nn.GELU,
     ):
         super().__init__()
         self.in_features = in_features
@@ -73,10 +97,10 @@ class MLP(nn.Module):
         self.hidden_features = hidden_features
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.fc2 = nn.Linear(hidden_features, out_features)
-    
+        self.act = act_layer()
     def forward(self, x: torch.Tensor):
         x = self.fc1(x)
-        x = F.gelu(x)
+        x = self.act(x)
         x = self.fc2(x)
         return x
 
@@ -101,8 +125,8 @@ class MultiHeadSelfAttention(nn.Module):
         self.o_prj = nn.Linear(embed_dim, embed_dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.scale = self.head_dim ** -0.5
-
-    def forward(self, x: torch.Tensor):
+    
+    def forward(self, x:torch.Tensor):
         B, N, C = x.shape
         q = self.q_proj(x)
         k = self.k_proj(x)
@@ -121,9 +145,9 @@ class MultiHeadSelfAttention(nn.Module):
 class WindowAttention(nn.Module):
     def __init__(
         self,
-        embed_dim:int,
-        num_heads:int,
-        window_size:tuple[int, int],
+        window_size: tuple[int, int, int] | tuple[int, int],
+        embed_dim:int=768,
+        num_heads:int= 8,
         qkv_bias:bool = True,
         attn_drop:float = 0.0,
         proj_drop:float = 0.0,
@@ -131,16 +155,86 @@ class WindowAttention(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.window_size = window_size
-        self.qkv_bias = qkv_bias
-        self.attn_drop = attn_drop
-        self.proj_drop = proj_drop
+        self.window_size = window_size #window size: [D, H, W]
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj_drop = nn.Dropout(proj_drop)
         self.head_dim = embed_dim // num_heads
         self.scale = self.head_dim ** -0.5
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias = qkv_bias)
+        self.softmax = nn.Softmax(dim = -1)
+        self.qkv_proj = nn.Linear(embed_dim, embed_dim * 3, bias=qkv_bias)
+        self.o_prj = nn.Linear(embed_dim, embed_dim, bias=qkv_bias)
+        if len(self.window_size) == 3:
+            self.relative_position_bias_table = nn.Parameter(
+                torch.zeros(
+                    (2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1) * (2 * self.window_size[2] - 1),num_heads
+                )
+            )
+            coords_d = torch.arange(self.window_size[0])
+            coords_h = torch.arange(self.window_size[1])
+            coords_w = torch.arange(self.window_size[2])
+            # Shape: (3, Wd, Wh, Ww)
+            coords = torch.stack(torch.meshgrid(coords_d, coords_h, coords_w, indexing="ij"))
+            coords_flatten = torch.flatten(coords, 1)
+            relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+            # Shape: (N, N, 3), N = Wd*Wh*Ww
+            relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+            relative_coords[:, :, 0] += self.window_size[0] - 1
+            relative_coords[:, :, 1] += self.window_size[1] - 1
+            relative_coords[:, :, 2] += self.window_size[2] - 1
+            # (X, Y, Z) -> Flatten: X + WIDTH * ( Y + DEPTH * Z)
+            relative_coords[:, :, 0] *= (2*self.window_size[1] - 1) * (2*self.window_size[2] -1)
+            relative_coords[:, :, 1] *= (2*self.window_size[2] - 1)
+
+        elif len(self.window_size) == 2:
+            self.relative_position_bias_table = nn.Parameter(
+                torch.zeros(
+                    (2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1), num_heads
+                )
+            )
+            coords_h = torch.arange(self.window_size[0])
+            coords_w = torch.arange(self.window_size[1])
+            coords = torch.stack(torch.meshgrid(coords_h, coords_w, indexing="ij"))
+            coords_flatten = torch.flatten(coords, 1)
+            relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+            #Shape (N, N, 2), N = Wd*Wh
+            relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+            relative_coords[:, :, 0] += self.window_size[0] - 1
+            relative_coords[:, :, 1] += self.window_size[1] -1
+            # (X, Y) -> Flatten: X + WIDTH * Y
+            relative_coords[:, :, 0] += 2 * self.window_size[1] - 1
+
+        relative_position_index = relative_coords.sum(-1)
+        self.register_buffer("relative_position_index", relative_position_index)
     
-    def forward(self, x:torch.Tensor):
-        pass 
+    def forward(self, x:torch.Tensor, mask):
+        B, N, C = x.shape
+        qkv = self.qkv_proj(x)
+        qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim)
+        # (B, N, 3, num_heads, head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k ,v = qkv[0], qkv[1], qkv[2]
+        # (B, num_heads, N, N)
+        attn = (q @ k.transpose(2, 3)) * self.scale
+        relative_position_bias = self.relative_position_bias_table[
+            self.relative_position_index.clone()[:n, :n].reshape(-1)  # type: ignore
+        ].reshape(N, N, -1)
+        relative_position_bias = relative_position_bias.permute(2, 0 , 1)
+        attn = attn + relative_position_bias.unsqueeze(0)
+        if mask is not None:
+            nw = mask.shape[0]
+            attn = attn.view(B // nw, nw, self.num_heads, N, N ) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn) 
+        attn = self.attn_drop(attn).to(v.dtype)
+        # (B. num_heads, N, N) -> (B, num_heads, N, head_dim) -> (B, N, C)
+        out = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        out = self.proj_drop(self.o_prj(out))
+        return out
+        
+
+        
 
 class ShiftedWindowAttention(nn.Module):
     def __init__(self, *args, **kwargs) -> None:
@@ -154,7 +248,7 @@ class SwinTransformerBlock(nn.Module):
         self, 
         embed_dim:int, 
         num_heads:int, 
-        window_size:tuple[int, int], 
+        window_size:tuple[int, int, int] | tuple[int, int],
         mlp_ratio:int = 4,
         qkv_bias:bool = True, 
         drop:float = 0.0, 
@@ -168,27 +262,29 @@ class SwinTransformerBlock(nn.Module):
         self.num_heads = num_heads
         self.window_size = window_size
         self.mlp_ratio = mlp_ratio
-        self.norm = norm_layer(embed_dim)
+        self.norm1 = norm_layer(embed_dim)
         self.attn_drop = nn.Dropout(p=attn_drop)
+        self.norm2 = norm_layer(embed_dim)
         self.path_drop = nn.Dropout(p=drop_path)
         self.mlp = MLP(embed_dim, embed_dim, mlp_ratio * embed_dim)
-        self.w_msa = WindowAttention(embed_dim, window_size=self.window_size,qkv_bias=qkv_bias, 
+        self.w_msa = WindowAttention(window_size, embed_dim, qkv_bias=qkv_bias, 
         attn_drop=attn_drop,)
         self.sw_msa = ShiftedWindowAttention(embed_dim, window_size=self.window_size,qkv_bias=qkv_bias, attn_drop=attn_drop,)
     
     def forward(self, x:torch.Tensor):
         # First pass 
         residual = x 
-        x = self.w_msa(self.norm(x))
+        x = self.attn_drop(self.w_msa(self.norm1(x)))
         x = residual + x
         residual = x
-        x = self.mlp(self.norm(x))
+        x = self.path_drop(self.mlp(self.norm2(x)))
         #Second pass
         residual = x 
-        x = self.sw_msa(self.norm(x))
+        x = self.attn_drop(self.sw_msa(self.norm1(x)))
         x = residual + x
         residual = x
-        x = self.mlp(self.norm(x))
+        x = self.path_drop(self.mlp(self.norm2(x)))
+        x = residual + x
         return x
 
 class SwinUNETRWrapper(nn.Module):
@@ -207,7 +303,7 @@ class SwinUNETRWrapper(nn.Module):
         self,
         in_channels: int = 1,
         out_channels: int = 14,
-        img_size: tuple[int, int, int] = (128, 128, 64),
+        img_size: tuple[int, int, int] = (96, 96, 96),
         feature_size: int = 48,
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -224,12 +320,11 @@ class SwinUNETRWrapper(nn.Module):
             attn_drop_rate=attn_drop_rate,
             dropout_path_rate=dropout_path_rate,
             use_checkpoint=use_checkpoint,
-            weights_path=weights_path,
         )
 
     def load_pretrained(self, weights_path: str | Path) -> None:
         """Load pretrained Swin encoder weights (partial weight loading)."""
-        self.model.load_state_dict(torch.load(weights_path))
+        self.model.load_from(torch.load(weights_path, weights_only=True))
 
     def forward(self, x):
         return self.model(x)
@@ -243,4 +338,10 @@ if __name__ == "__main__":
         image_size=224
     )
     rand = torch.rand((4, 3, 224, 224))
+    imgs = torch.rand((4, 1, 96, 96, 96))
     print(patch_embed(rand).shape)
+    # swin_unetr = SwinUNETRWrapper()
+    # print(swin_unetr(imgs).shape)
+    mlp = MLP(768, 768, 768 * 4)
+    img = torch.rand(4, 196, 768)
+    print(mlp.act)

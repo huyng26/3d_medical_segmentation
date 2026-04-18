@@ -1,7 +1,8 @@
 # BTCV (Synapse) dataset configuration
 dataset: btcv
 
-data_path: data/BTCV
+paths:
+  data_dir: data/BTCV
 # 13 foreground classes (1-indexed); 0 = background
 num_classes: 14
 label_names:

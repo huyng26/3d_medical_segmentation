@@ -20,9 +20,9 @@ def build_btcv_dataloader(args,mode: str = "train"):
     if mode == "train":
         train_transforms = build_btcv_train_transforms()
         train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=1.0, num_workers=4)
-        train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=4)
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
         return train_loader
-    else:
+    elif mode == "test":
         test_transforms = build_btcv_test_transforms()
         test_ds = CacheDataset(data=test_files, transform=test_transforms, cache_rate=1.0, num_workers=4)
         test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=4)

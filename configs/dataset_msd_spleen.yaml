@@ -3,8 +3,7 @@ dataset: msd_spleen
 msd_task: Task09_Spleen
 
 paths:
-  raw_dir: data/raw/msd/Task09_Spleen
-  processed_dir: data/processed/msd/Task09_Spleen
+  data_dir: data/MSD/Task09_Spleen
 
 # 0 = background, 1 = spleen
 num_classes: 2

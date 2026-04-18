@@ -1,4 +1,4 @@
-"""SkipDenseNet3D architecture (Phase 3).
+""" AttentionUNET architecture (Phase 3).
 
 Encoder-decoder where each encoder stage is a 3-D dense block.
 Every dense layer concatenates all preceding feature maps (dense connectivity).
@@ -92,7 +92,7 @@ class TransitionUp(nn.Module):
         raise NotImplementedError
 
 
-class SkipDenseNet3D(nn.Module):
+class AttentionUNet(nn.Module):
     """Full SkipDenseNet3D encoder-decoder network.
 
     Args:

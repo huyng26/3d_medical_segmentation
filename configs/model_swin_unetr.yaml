@@ -4,7 +4,7 @@ model: swin_unetr
 architecture:
   in_channels: 1
   out_channels: null    # filled from dataset config at runtime
-  img_size: [128, 128, 64]    # must match patch_size in train_default.yaml
+  img_size: [96, 96,96]    # must match patch_size in train_default.yaml
   feature_size: 48
   drop_rate: 0.0
   attn_drop_rate: 0.0

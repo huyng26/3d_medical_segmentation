@@ -3,8 +3,7 @@ dataset: msd_liver
 msd_task: Task03_Liver
 
 paths:
-  raw_dir: data/raw/msd/Task03_Liver
-  processed_dir: data/processed/msd/Task03_Liver
+  data_dir: data/MSD/Task02_Heart
 
 # 0 = background, 1 = liver, 2 = tumour
 num_classes: 3

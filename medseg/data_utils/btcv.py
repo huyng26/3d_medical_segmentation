@@ -8,24 +8,22 @@ def build_btcv_dataloader(args,mode: str = "train"):
     data_path = args.data_path
 
     #Data paths
-    print(data_path)
     train_images = sorted(glob.glob(os.path.join(data_path, "imagesTr", "*.nii.gz")))
     train_labels = sorted(glob.glob(os.path.join(data_path, "labelsTr", "*.nii.gz")))
     test_images = sorted(glob.glob(os.path.join(data_path, "imagesTs", "*.nii.gz")))
     test_labels = sorted(glob.glob(os.path.join(data_path, "labelsTs", "*.nii.gz")))
-    print(train_images)
     train_files = [{"image": image, "label": label} for image, label in zip(train_images, train_labels)]
     test_files = [{"image": image, "label": label} for image, label in zip(test_images, test_labels)]
     
     if mode == "train":
-        train_transforms = build_btcv_train_transforms()
-        train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=1.0, num_workers=4)
+        train_transforms = build_btcv_train_transforms(roi_size=tuple(args.img_size))
+        train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=1.0, num_workers=args.num_workers)
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
         return train_loader
-    elif mode == "test":
+    if mode == "test":
         test_transforms = build_btcv_test_transforms()
-        test_ds = CacheDataset(data=test_files, transform=test_transforms, cache_rate=1.0, num_workers=4)
-        test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=4)
+        test_ds = CacheDataset(data=test_files, transform=test_transforms, cache_rate=1.0, num_workers=args.num_workers)
+        test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=args.num_workers)
         return test_loader
 
 

@@ -19,8 +19,9 @@ from monai.transforms import (
     AsDiscreted,
     SaveImaged
 )
+import argparse
 
-def build_btcv_train_transforms():
+def build_btcv_train_transforms(roi_size):
     """Return a MONAI ``Compose`` transform for training augmentation.
 
     Augmentations applied (per the project plan):
@@ -55,7 +56,7 @@ def build_btcv_train_transforms():
         RandCropByPosNegLabeld(
             keys=["image", "label"],
             label_key="label",
-            spatial_size=(96, 96, 96),
+            spatial_size=roi_size,
             pos=1,
             neg=1,
             num_samples=4,
@@ -109,7 +110,7 @@ def build_btcv_test_transforms():
     )
     return val_transforms
 
-def build_msd_train_transforms():
+def build_msd_train_transforms(roi_size):
     train_transforms = Compose(
     [
         LoadImaged(keys=["image", "label"]),
@@ -128,7 +129,7 @@ def build_msd_train_transforms():
         RandCropByPosNegLabeld(
             keys=["image", "label"],
             label_key="label",
-            spatial_size=(96, 96, 96),
+            spatial_size=roi_size,
             pos=1,
             neg=1,
             num_samples=4,

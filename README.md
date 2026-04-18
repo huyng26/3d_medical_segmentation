@@ -4,8 +4,8 @@ This project reimplements three 3D medical image segmentation architectures from
 
 **Implemented models:**
 - 3D U-Net
-- SkipDenseNet3D (Attention U-Net variant)
-- Swin UNETR (wrapping MONAI's pretrained Swin Transformer encoder)
+- Attention U-Net
+- Swin UNETR 
 
 ---
 

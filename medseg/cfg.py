@@ -5,7 +5,7 @@ def load_args():
     parser = argparse.ArgumentParser(description="Train a 3D medical image segmentation model.")
     #dataset 
     parser.add_argument("--dataset", type=str, choices=["btcv", "msd"], required=True, help="Dataset to use for training.")
-    parser.add_argument("--data_path", type=str, help="Path to the dataset.")
+    parser.add_argument("--data_path", type=str, default="./data/BTCV", help="Path to the dataset.")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training.")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
     parser.add_argument("--msd_task", type=int, choices=[2, 9], default=2, help="MSD task number (2 for Heart, 9 for Spleen).")
@@ -18,7 +18,7 @@ def load_args():
     parser.add_argument("--pretrain", type=str, default="", help="Path to pretrained model weights (optional).")
 
     #training
-    parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs.")
+    parser.add_argument("--num_epochs", type=int, default=2, help="Number of training epochs.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Initial learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay for optimizer.")
     parser.add_argument("--amp", action="store_true", help="Use automatic mixed precision for training.")

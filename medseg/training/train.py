@@ -11,7 +11,8 @@ from medseg.data_utils.msd import build_msd_dataloader
 from medseg.models import build_model
 from medseg.cfg import load_args
 from monai.inferers import sliding_window_inference 
-from typing import Any
+from pathlib import Path
+from tqdm import tqdm
 
 
 def build_scheduler(optimizer, args: argparse.Namespace):
@@ -83,7 +84,7 @@ def validate(model, loader, loss_fn, device, num_classes: int, args: argparse.Na
         for batch_data in loader: 
             image, label = batch_data["image"].to(device), batch_data["label"].to(device)
             with torch.autocast("cuda", enabled=args.amp):
-                roi_size = args.img_size
+                roi_size = tuple(args.img_size)
                 logits = sliding_window_inference(image, roi_size,sw_batch_size=4,predictor=model, overlap=0.25)
                 loss = loss_fn(logits, label)
             total_loss += float(loss.detach().item())
@@ -110,14 +111,52 @@ def validate(model, loader, loss_fn, device, num_classes: int, args: argparse.Na
 def main(args: argparse.Namespace) -> None:
     """Entry point: parse args, build components, and run the training loop."""
     model = build_model(args.model_name, cfg=args)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
     train_loader, test_loader= _build_loaders(args)
     loss_fn = DiceLoss(to_onehot_y=True, softmax=True)
     scaler = torch.GradScaler("cuda")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = build_scheduler(optimizer, args)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
     num_epochs = args.num_epochs
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    best_dsc = 0.0 
+
+    for epoch in tqdm(range(num_epochs), desc="Training", unit="epoch"):
+        train_metrics = train_one_epoch(
+            model, 
+            train_loader, 
+            optimizer, 
+            scaler, 
+            loss_fn, 
+            device, 
+            args, 
+            scheduler
+        )
+
+        test_metrics = validate(
+            model,
+            test_loader,
+            loss_fn,
+            device,
+            args.num_classes,
+            args
+        )
+
+        print(
+            f"Epoch [{epoch:03d}/{args.num_epochs}] "
+            f"train_loss={train_metrics['loss']:.4f} | "
+            f"val_loss={test_metrics['loss']:.4f} | "
+            f"DSC={test_metrics['dsc_mean']:.4f}"
+        )
+
+        if test_metrics["dsc_mean"] > best_dsc:
+            best_dsc = test_metrics["dsc_mean"]
+            torch.save(model.state_dict(), save_dir / "best_model.pth")
+            print(f"Saved best model with DSC = {best_dsc:.4f}")
 
 
 if __name__ == "__main__":

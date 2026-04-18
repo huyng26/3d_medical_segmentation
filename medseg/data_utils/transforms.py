@@ -21,7 +21,7 @@ from monai.transforms import (
 )
 import argparse
 
-def build_btcv_train_transforms(roi_size):
+def build_btcv_train_transforms(roi_size, crop_samples):
     """Return a MONAI ``Compose`` transform for training augmentation.
 
     Augmentations applied (per the project plan):
@@ -59,7 +59,7 @@ def build_btcv_train_transforms(roi_size):
             spatial_size=roi_size,
             pos=1,
             neg=1,
-            num_samples=4,
+            num_samples=crop_samples,
             image_key="image",
             image_threshold=0,
         ),
@@ -110,7 +110,7 @@ def build_btcv_test_transforms():
     )
     return val_transforms
 
-def build_msd_train_transforms(roi_size):
+def build_msd_train_transforms(roi_size, crop_samples):
     train_transforms = Compose(
     [
         LoadImaged(keys=["image", "label"]),
@@ -132,7 +132,7 @@ def build_msd_train_transforms(roi_size):
             spatial_size=roi_size,
             pos=1,
             neg=1,
-            num_samples=4,
+            num_samples=crop_samples,
             image_key="image",
             image_threshold=0,
         ),

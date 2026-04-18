@@ -9,6 +9,7 @@ def load_args():
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training.")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading.")
     parser.add_argument("--msd_task", type=int, choices=[2, 9], default=2, help="MSD task number (2 for Heart, 9 for Spleen).")
+    parser.add_argument("--crop_samples", type=int, default=1, help="Number of samples for random cropping.")
 
     #model 
     parser.add_argument("--model_name", type=str, required=True, default="unet3d", help="Model architecture to use.")

@@ -45,7 +45,6 @@ def train_one_epoch(model, loader, optimizer, scaler, loss_fn, device, args:argp
     """
     model.train()
     total_loss = 0.0
-    num_batches = 0
     scheduler_step = args.scheduler_step
     use_amp = args.amp
     n =  0

@@ -22,7 +22,7 @@ def build_msd_dataloader(args,mode: str = "train", task: int = 2):
     test_files = [{"image": image, "label": label} for image, label in zip(test_images, test_labels)]
     
     if mode == "train":
-        train_transforms = build_msd_train_transforms(roi_size=args.img_size)
+        train_transforms = build_msd_train_transforms(roi_size=tuple(args.img_size), crop_samples=args.crop_samples)
         train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=1.0, num_workers=args.num_workers)
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
         return train_loader

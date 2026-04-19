@@ -14,6 +14,11 @@ from monai.inferers import sliding_window_inference
 from pathlib import Path
 from tqdm import tqdm
 
+try:
+    import wandb  # type: ignore[import-not-found]
+except ImportError:
+    wandb = None
+
 
 def build_scheduler(optimizer, args: argparse.Namespace):
     """Return a cosine-annealing LR scheduler configured from ``cfg``."""
@@ -121,6 +126,16 @@ def main(args: argparse.Namespace) -> None:
     num_epochs = args.num_epochs
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = None
+    if args.wandb_enabled:
+        if wandb is None:
+            print("wandb is not installed. Skipping wandb logging.")
+        else:
+            wandb_run = wandb.init(
+                project="3d-medical-segmentation",
+                config=vars(args),
+                dir=str(save_dir),
+            )
 
     best_dsc = 0.0 
 
@@ -152,10 +167,23 @@ def main(args: argparse.Namespace) -> None:
             f"DSC={test_metrics['dsc_mean']:.4f}"
         )
 
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "train/loss": train_metrics["loss"],
+                    "val/loss": test_metrics["loss"],
+                    "val/dice": test_metrics["dsc_mean"],
+                },
+                step=epoch + 1,
+            )
+
         if test_metrics["dsc_mean"] > best_dsc:
             best_dsc = test_metrics["dsc_mean"]
             torch.save(model.state_dict(), save_dir / "best_model.pth")
             print(f"Saved best model with DSC = {best_dsc:.4f}")
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ def load_args():
     parser.add_argument("--T_max", type=int, default=100, help="T_max parameter for CosineAnnealingLR scheduler.")
     parser.add_argument("--eta_min", type=float, default=0.0, help="eta_min parameter for CosineAnnealingLR scheduler.")
     parser.add_argument("--save_dir", type=str, default="./checkpoints", help="Directory to save model checkpoints.")
+    parser.add_argument("--wandb_enabled", action="store_true", help="Enable Weights & Biases logging.")
     
     #inference 
     parser.add_argument("--checkpoint", type=str, help="Path to the checkpoint to load for inference.")

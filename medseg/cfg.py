@@ -20,6 +20,8 @@ def load_args():
 
     #training
     parser.add_argument("--num_epochs", type=int, default=2, help="Number of training epochs.")
+    parser.add_argument("--max_iterations", type=int, default=0, help="Maximum training steps. If <= 0, computed from num_epochs * steps_per_epoch.")
+    parser.add_argument("--eval_num", type=int, default=100, help="Run validation every N training steps.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Initial learning rate.")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay for optimizer.")
     parser.add_argument("--amp", action="store_true", help="Use automatic mixed precision for training.")

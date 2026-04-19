@@ -179,7 +179,10 @@ def main(args: argparse.Namespace) -> None:
 
         if test_metrics["dsc_mean"] > best_dsc:
             best_dsc = test_metrics["dsc_mean"]
-            torch.save(model.state_dict(), save_dir / "best_model.pth")
+            if args.dataset == "msd":
+                torch.save(model.state_dict(), save_dir / f"{args.model_name}_msd_task{args.msd_task}_best_model.pth")
+            else:
+                torch.save(model.state_dict(), save_dir / f"{args.model_name}_{args.dataset}_best_model.pth")
             print(f"Saved best model with DSC = {best_dsc:.4f}")
 
     if wandb_run is not None:

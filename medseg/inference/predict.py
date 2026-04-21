@@ -10,9 +10,12 @@ from pathlib import Path
 
 import torch
 from data_utils.transforms import build_inference_transforms, build_postprocess_transforms
+import argparse
+import torch.nn as nn
 
 def predict_volume(
     model: torch.nn.Module,
+    args: argparse.Namespace,
     image: torch.Tensor,
     patch_size: tuple[int, int, int],
     sw_batch_size: int = 4,
@@ -32,13 +35,13 @@ def predict_volume(
     Returns:
         Soft probability map of shape (1, C, D, H, W).
     """
-    raise NotImplementedError
+    inference_transforms = build_inference_transforms()
 
 
 def postprocess(
     prob_map: torch.Tensor,
     min_connected_component_size: int = 0,
-) -> torch.Tensor:
+):
     """Apply argmax and optional connected-component filtering.
 
     Args:
@@ -49,8 +52,9 @@ def postprocess(
     Returns:
         Integer label map of shape (1, D, H, W).
     """
-    return build_postprocess_transforms()
-
+    postprocess_transforms = build_postprocess_transforms()
+    postprocess_map = postprocess_transforms(prob_map)
+    return postprocess_map
 
 def load_checkpoint(checkpoint_path: str | Path, model: torch.nn.Module, device) -> torch.nn.Module:
     """Load a saved checkpoint into ``model`` and return it in eval mode."""

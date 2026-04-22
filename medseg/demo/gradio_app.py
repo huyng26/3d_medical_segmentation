@@ -20,9 +20,9 @@ import argparse
 import numpy as np
 from pathlib import Path
 from typing import Any
+import nibabel as nib
 from monai.inferers.utils import sliding_window_inference
 from medseg.models import build_model
-from monai.transforms import LoadImage
 from monai.data import Dataset, DataLoader, decollate_batch
 from medseg.data_utils.transforms import build_msd_inference_transforms, build_btcv_inference_transforms
 import matplotlib.pyplot as plt
@@ -33,7 +33,6 @@ OUT_DIR = os.path.abspath("./out")
 SUPPORTED_MODELS = ("unet3d", "attention_unet", "swin_unetr")
 SUPPORTED_DATASETS = ("btcv", "msd")
 SUPPORTED_MSD_TASKS = (2, 9)
-loader = LoadImage()
 
 def _checkpoint_path(args: argparse.Namespace, model_name: str) -> str:
     if args.dataset == "msd":
@@ -153,13 +152,21 @@ def _slice_for_axis(volume: np.ndarray, seg: np.ndarray, axis: str, slice_idx: i
     raise ValueError("axis must be one of: axial, coronal, sagittal")
 
 
+def _load_nifti_volume(path: str) -> np.ndarray:
+    """Load a NIfTI file with nibabel and return a 3-D numpy array (D, H, W)."""
+    img = nib.load(path)
+    vol = np.asarray(img.dataobj)
+    # Squeeze a trailing size-1 time/component dimension if present.
+    if vol.ndim == 4 and vol.shape[-1] == 1:
+        vol = vol[..., 0]
+    return vol
+
+
 def _uploaded_max_slice(nifti_path: Any, axis: str) -> int:
     """Return the maximum valid slice index for *axis* by loading the raw NIfTI."""
     path = _resolve_uploaded_path(nifti_path)
     _validate_nifti_path(path)
-    vol = np.asarray(loader(path))
-    if vol.ndim == 4 and vol.shape[0] == 1:
-        vol = vol[0]
+    vol = _load_nifti_volume(path)
     if axis == "axial":
         return int(vol.shape[0] - 1)
     if axis == "coronal":
@@ -309,14 +316,15 @@ def render_seg_slice(
         A ``matplotlib.figure.Figure`` for Gradio to display.
     """
     orig_path = _resolve_uploaded_path(nifti_path)
-    volume = np.asarray(loader(orig_path))
-    if volume.ndim == 4 and volume.shape[0] == 1:
-        volume = volume[0]
+    volume = _load_nifti_volume(orig_path)
 
-    seg_arr = np.asarray(loader(seg_path))
-    # SaveImaged writes one-hot (C, D, H, W); recover label map via argmax.
+    # nibabel loads NIfTI as (D, H, W) or (D, H, W, C) — channels last.
+    # MONAI's SaveImaged writes the one-hot tensor in that same layout, so
+    # argmax along the last axis recovers the integer label map.
+    seg_img = nib.load(seg_path)
+    seg_arr = np.asarray(seg_img.dataobj)
     if seg_arr.ndim == 4:
-        seg = np.argmax(seg_arr, axis=0)
+        seg = np.argmax(seg_arr, axis=-1)
     else:
         seg = seg_arr.squeeze()
 

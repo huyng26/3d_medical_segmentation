@@ -2,27 +2,33 @@
 
 UI flow:
   1. User uploads a NIfTI file.
-  2. User selects model (unet3d | skip_densenet3d | swin_unetr).
-  3. User selects viewing axis (axial | sagittal | coronal) and slice index.
-  4. App runs sliding-window inference and renders the segmentation overlay.
+  2. User selects model (unet3d | attention_unet | swin_unetr), dataset, and axis/slice.
+  3. Click "Run Segmentation" — sliding-window inference runs once; the result
+     NIfTI is written to OUT_DIR by SaveImaged (post-transform).
+  4. The saved segmentation NIfTI is loaded and the overlay is rendered.
+  5. Changing axis or slice re-renders from the saved file instantly — no
+     further inference is needed.
 
 Models are loaded once at startup to minimise per-request latency.
 Inference runs on GPU when available, CPU as fallback.
 """
 from __future__ import annotations
 import os
+import glob
 import torch
 import argparse
 import numpy as np
+from pathlib import Path
 from typing import Any
 from monai.inferers.utils import sliding_window_inference
 from medseg.models import build_model
 from monai.transforms import LoadImage
-from monai.data import Dataset, DataLoader,  decollate_batch
-from monai.handlers.utils import from_engine
+from monai.data import Dataset, DataLoader, decollate_batch
 from medseg.data_utils.transforms import build_msd_inference_transforms, build_btcv_inference_transforms
 import matplotlib.pyplot as plt
 import gradio as gr
+
+OUT_DIR = os.path.abspath("./out")
 
 SUPPORTED_MODELS = ("unet3d", "attention_unet", "swin_unetr")
 SUPPORTED_DATASETS = ("btcv", "msd")
@@ -147,17 +153,13 @@ def _slice_for_axis(volume: np.ndarray, seg: np.ndarray, axis: str, slice_idx: i
     raise ValueError("axis must be one of: axial, coronal, sagittal")
 
 
-def _uploaded_max_slice(args, nifti_path: Any, axis: str) -> int:
+def _uploaded_max_slice(nifti_path: Any, axis: str) -> int:
+    """Return the maximum valid slice index for *axis* by loading the raw NIfTI."""
     path = _resolve_uploaded_path(nifti_path)
     _validate_nifti_path(path)
-    infer_transforms, post_process = build_msd_inference_transforms() if args.dataset == "msd" else build_btcv_inference_transforms()
-    sample_obj = infer_transforms({"image": path})
-    if not isinstance(sample_obj, dict) or "image" not in sample_obj:
-        return 0
-    vol_tensor = sample_obj["image"]
-    if not isinstance(vol_tensor, torch.Tensor):
-        vol_tensor = torch.as_tensor(vol_tensor)
-    vol = vol_tensor.squeeze(0).detach().cpu().numpy()
+    vol = np.asarray(loader(path))
+    if vol.ndim == 4 and vol.shape[0] == 1:
+        vol = vol[0]
     if axis == "axial":
         return int(vol.shape[0] - 1)
     if axis == "coronal":
@@ -165,6 +167,39 @@ def _uploaded_max_slice(args, nifti_path: Any, axis: str) -> int:
     if axis == "sagittal":
         return int(vol.shape[2] - 1)
     return 0
+
+
+def _find_seg_output(input_path: str, out_dir: str) -> str | None:
+    """Locate the NIfTI segmentation file written by ``SaveImaged``.
+
+    MONAI's ``SaveImaged`` (with ``separate_folder=True``, the default) saves
+    to ``{out_dir}/{stem}/{stem}_seg.nii.gz``.  We also check the flat layout
+    ``{out_dir}/{stem}_seg.nii.gz`` as a fallback, and use glob for any
+    compression variant.
+    """
+    stem = Path(input_path).name
+    for ext in (".nii.gz", ".nii"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+
+    candidates = [
+        os.path.join(out_dir, stem, f"{stem}_seg.nii.gz"),
+        os.path.join(out_dir, stem, f"{stem}_seg.nii"),
+        os.path.join(out_dir, f"{stem}_seg.nii.gz"),
+        os.path.join(out_dir, f"{stem}_seg.nii"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    # Broader glob in case MONAI appended extra suffixes
+    pattern = os.path.join(out_dir, "**", f"{stem}_seg*")
+    matches = glob.glob(pattern, recursive=True)
+    if matches:
+        return sorted(matches)[-1]
+
+    return None
 
 
 def load_models(args: argparse.Namespace) -> dict[str, torch.nn.Module]:
@@ -199,78 +234,106 @@ def load_models(args: argparse.Namespace) -> dict[str, torch.nn.Module]:
         )
     return loaded
 
-def segment_nifti(
+def run_inference_to_file(
     nifti_path: Any,
     args: argparse.Namespace,
     model: torch.nn.Module,
-    axis: str,
-    slice_idx: int,
-):
-    """Run inference and return a matplotlib figure with the overlay.
+    out_dir: str = OUT_DIR,
+) -> str:
+    """Run sliding-window inference and save the segmentation NIfTI via ``SaveImaged``.
 
     Args:
-        nifti_path:  Path to the uploaded NIfTI file.
-        args:        Command-line arguments.
-        axis:        Viewing plane — ``"axial"``, ``"sagittal"``, or ``"coronal"``.
-        slice_idx:   Index of the slice to display.
-        models:      Pre-loaded model dict from ``load_models``.
+        nifti_path: Path to the uploaded NIfTI file.
+        args:       Runtime arguments (dataset, img_size, …).
+        model:      Pre-loaded model in eval mode.
+        out_dir:    Root directory passed to ``SaveImaged``.
 
     Returns:
-        A ``matplotlib.figure.Figure`` for Gradio to display.
+        Absolute path to the saved segmentation NIfTI file.
     """
     path = _resolve_uploaded_path(nifti_path)
     _validate_nifti_path(path)
     if not os.path.exists(path):
         raise FileNotFoundError(f"File not found: {path}")
 
-    infer_transforms, post_process = build_msd_inference_transforms() if args.dataset == "msd" else build_btcv_inference_transforms()
-    test_data = [{'image': path}]
-    test_org_ds = Dataset(data=test_data, transform=infer_transforms) 
-    test_loader = DataLoader(test_org_ds, batch_size=1, shuffle=False) 
+    infer_transforms, post_process = (
+        build_msd_inference_transforms(output_dir=out_dir)
+        if args.dataset == "msd"
+        else build_btcv_inference_transforms(output_dir=out_dir)
+    )
+    test_loader = DataLoader(
+        Dataset(data=[{"image": path}], transform=infer_transforms),
+        batch_size=1,
+        shuffle=False,
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with torch.no_grad():
-        for test_data in test_loader:
-            image = test_data['image'].to(device)
-            test_data['pred'] = sliding_window_inference(
-                inputs=image,
+        for batch in test_loader:
+            batch["pred"] = sliding_window_inference(
+                inputs=batch["image"].to(device),
                 roi_size=tuple(args.img_size),
                 sw_batch_size=4,
                 predictor=model,
             )
-            test_data = [post_process(i) for i in decollate_batch(test_data)]
+            for item in decollate_batch(batch):
+                post_process(item)
 
-            test_output = from_engine(["pred"])(test_data)
-            if not isinstance(test_output, list) or not test_output:
-                raise RuntimeError("Post-processing produced no prediction output.")
-
-            original_image = loader(path)
-            volume = np.asarray(original_image)
-            if volume.ndim == 4 and volume.shape[0] == 1:
-                volume = volume[0]
-
-            pred_obj = test_output[0]
-            pred_tensor = pred_obj.detach().cpu() if isinstance(pred_obj, torch.Tensor) else torch.as_tensor(pred_obj)
-            seg = torch.argmax(pred_tensor, dim=0).numpy()
-
-            vol_slice, seg_slice, used_idx, max_idx = _slice_for_axis(volume, seg, axis, slice_idx)
-
-            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-            axes[0].imshow(vol_slice, cmap="gray")
-            axes[0].set_title(f"Input ({axis}, slice {used_idx}/{max_idx})")
-            axes[0].axis("off")
-
-            seg_masked = np.ma.masked_where(seg_slice == 0, seg_slice)
-            axes[1].imshow(vol_slice, cmap="gray")
-            axes[1].imshow(seg_masked, cmap="turbo", alpha=0.45)
-            axes[1].set_title("Segmentation Overlay")
-            axes[1].axis("off")
-            fig.tight_layout()
-            return fig
-
-    raise RuntimeError("Inference did not produce any output.")
+    seg_path = _find_seg_output(path, out_dir)
+    if seg_path is None:
+        raise RuntimeError(
+            f"Inference completed but no segmentation file was found under {out_dir!r}. "
+            "Check that SaveImaged wrote successfully."
+        )
+    return seg_path
 
 
+def render_seg_slice(
+    nifti_path: Any,
+    seg_path: str,
+    axis: str,
+    slice_idx: int,
+) -> "plt.Figure":
+    """Load a saved segmentation NIfTI and render an overlay figure.
+
+    This function does **not** run inference — it only reads the files that
+    ``run_inference_to_file`` already wrote to disk.
+
+    Args:
+        nifti_path: Original input NIfTI (for the background grey-scale image).
+        seg_path:   Path to the saved segmentation NIfTI produced by inference.
+        axis:       Viewing plane — ``"axial"``, ``"sagittal"``, or ``"coronal"``.
+        slice_idx:  Index of the slice to display.
+
+    Returns:
+        A ``matplotlib.figure.Figure`` for Gradio to display.
+    """
+    orig_path = _resolve_uploaded_path(nifti_path)
+    volume = np.asarray(loader(orig_path))
+    if volume.ndim == 4 and volume.shape[0] == 1:
+        volume = volume[0]
+
+    seg_arr = np.asarray(loader(seg_path))
+    # SaveImaged writes one-hot (C, D, H, W); recover label map via argmax.
+    if seg_arr.ndim == 4:
+        seg = np.argmax(seg_arr, axis=0)
+    else:
+        seg = seg_arr.squeeze()
+
+    vol_slice, seg_slice, used_idx, max_idx = _slice_for_axis(volume, seg, axis, slice_idx)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    axes[0].imshow(vol_slice, cmap="gray")
+    axes[0].set_title(f"Input ({axis}, slice {used_idx}/{max_idx})")
+    axes[0].axis("off")
+
+    seg_masked = np.ma.masked_where(seg_slice == 0, seg_slice)
+    axes[1].imshow(vol_slice, cmap="gray")
+    axes[1].imshow(seg_masked, cmap="turbo", alpha=0.45)
+    axes[1].set_title("Segmentation Overlay")
+    axes[1].axis("off")
+    fig.tight_layout()
+    return fig
 
 
 def build_interface(args: argparse.Namespace):
@@ -282,7 +345,7 @@ def build_interface(args: argparse.Namespace):
         if nifti_file is None:
             return gr.update(maximum=0, value=0)
         try:
-            max_idx = _uploaded_max_slice(args, nifti_file, axis_name)
+            max_idx = _uploaded_max_slice(nifti_file, axis_name)
         except Exception:
             max_idx = 256
         return gr.update(maximum=max_idx, value=max_idx // 2)
@@ -318,6 +381,11 @@ def build_interface(args: argparse.Namespace):
         axis_name,
         slice_value,
     ):
+        """Run inference once, save NIfTI, render the first overlay.
+
+        Returns (figure, seg_path) so the seg_path can be stored in State
+        for subsequent slice/axis re-renders.
+        """
         if nifti_file is None:
             raise gr.Error("Please upload a NIfTI volume first.")
 
@@ -336,22 +404,52 @@ def build_interface(args: argparse.Namespace):
         except FileNotFoundError as exc:
             raise gr.Error(str(exc))
 
-        fig = segment_nifti(
+        try:
+            seg_path = run_inference_to_file(
+                nifti_path=nifti_file,
+                args=runtime_args,
+                model=model,
+                out_dir=OUT_DIR,
+            )
+        except Exception as exc:
+            raise gr.Error(str(exc))
+
+        fig = render_seg_slice(
             nifti_path=nifti_file,
-            args=runtime_args,
-            model=model,
+            seg_path=seg_path,
             axis=axis_name,
             slice_idx=int(slice_value),
         )
-        return fig
+        return fig, seg_path
+
+    def _rerender_slice(nifti_file, seg_path, axis_name, slice_value):
+        """Re-render from the already-saved segmentation NIfTI — no inference."""
+        if seg_path is None or nifti_file is None:
+            return None
+        try:
+            return render_seg_slice(
+                nifti_path=nifti_file,
+                seg_path=seg_path,
+                axis=axis_name,
+                slice_idx=int(slice_value),
+            )
+        except Exception as exc:
+            raise gr.Error(str(exc))
 
     with gr.Blocks(title="3D Medical Segmentation Demo") as demo:
         gr.Markdown("## 3D Medical Segmentation Demo")
-        gr.Markdown("Upload a NIfTI file, pick a model and viewing axis, then run segmentation.")
+        gr.Markdown(
+            "Upload a NIfTI file, pick a model and viewing axis, then click "
+            "**Run Segmentation**. Afterwards, adjust the axis or slice to "
+            "re-render instantly from the saved segmentation — no re-inference needed."
+        )
+
+        # Stores the path to the segmentation NIfTI saved by SaveImaged.
+        seg_path_state = gr.State(value=None)
 
         with gr.Row():
-            # Windows browsers may not match multi-part extensions like ".nii.gz" reliably.
-            # Accept ".gz" in picker, then validate strict NIfTI suffix server-side.
+            # Windows browsers may not match multi-part extensions like ".nii.gz"
+            # reliably. Accept ".gz" in picker; validate strict NIfTI suffix server-side.
             nifti_input = gr.File(label="NIfTI volume", file_types=[".nii", ".gz"], type="filepath")
             dataset_input = gr.Dropdown(
                 choices=list(SUPPORTED_DATASETS),
@@ -393,9 +491,23 @@ def build_interface(args: argparse.Namespace):
         )
         nifti_input.change(_update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input])
         axis_input.change(_update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input])
+
+        # Run inference once; store the saved seg path in State.
         run_button.click(
             _run_inference,
             inputs=[nifti_input, dataset_input, msd_task_input, model_input, axis_input, slice_input],
+            outputs=[out_plot, seg_path_state],
+        )
+
+        # Re-render from the saved NIfTI without re-running inference.
+        axis_input.change(
+            _rerender_slice,
+            inputs=[nifti_input, seg_path_state, axis_input, slice_input],
+            outputs=[out_plot],
+        )
+        slice_input.change(
+            _rerender_slice,
+            inputs=[nifti_input, seg_path_state, axis_input, slice_input],
             outputs=[out_plot],
         )
 

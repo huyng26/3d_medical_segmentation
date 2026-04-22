@@ -185,8 +185,12 @@ def build_msd_test_transforms():
     )
     return val_transforms
 
-def build_msd_inference_transforms():
-    """Return a MONAI ``Compose`` transform for full-volume inference."""
+def build_msd_inference_transforms(output_dir: str = "./out"):
+    """Return a MONAI ``Compose`` transform for full-volume MSD inference.
+
+    Args:
+        output_dir: Directory where ``SaveImaged`` writes the segmentation NIfTI.
+    """
     test_org_transforms = Compose(
     [
         LoadImaged(keys="image"),
@@ -217,13 +221,18 @@ def build_msd_inference_transforms():
             to_tensor=True,
         ),
         AsDiscreted(keys="pred", argmax=True, to_onehot=2),
-        SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir="../out", output_postfix="seg", resample=False),
+        SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir=output_dir, output_postfix="seg", resample=False),
     ]
     )
     
     return test_org_transforms, post_transforms
 
-def build_btcv_inference_transforms():
+def build_btcv_inference_transforms(output_dir: str = "./out"):
+    """Return a MONAI ``Compose`` transform for full-volume BTCV inference.
+
+    Args:
+        output_dir: Directory where ``SaveImaged`` writes the segmentation NIfTI.
+    """
     test_org_transforms = Compose(
     [
         LoadImaged(keys="image"),
@@ -255,7 +264,7 @@ def build_btcv_inference_transforms():
             to_tensor=True,
         ),
         AsDiscreted(keys="pred", argmax=True, to_onehot=14),  # 13 organs + background
-        SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir="./out", output_postfix="seg", resample=False),
+        SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir=output_dir, output_postfix="seg", resample=False),
     ]
     )
     return test_org_transforms, post_transforms

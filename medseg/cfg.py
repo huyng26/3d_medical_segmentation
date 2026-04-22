@@ -31,8 +31,11 @@ def load_args():
     parser.add_argument("--save_dir", type=str, default="./checkpoints", help="Directory to save model checkpoints.")
     parser.add_argument("--wandb_enabled", action="store_true", help="Enable Weights & Biases logging.")
     
-    #inference 
+    #inference
     parser.add_argument("--checkpoint", type=str, help="Path to the checkpoint to load for inference.")
+    parser.add_argument("--out_dir", type=str, default="./out", help="Root output directory for segmentation results.")
+    parser.add_argument("--sw_batch_size", type=int, default=4, help="Number of patches processed simultaneously during sliding-window inference.")
+    parser.add_argument("--overlap", type=float, default=0.5, help="Fractional overlap between adjacent sliding-window patches.")
     opt = parser.parse_args()
     return opt
 

@@ -17,7 +17,6 @@ from monai.transforms import (
     RandRotate90d,
     Invertd,
     AsDiscreted,
-    SaveImaged
 )
 import argparse
 
@@ -185,86 +184,85 @@ def build_msd_test_transforms():
     )
     return val_transforms
 
-def build_msd_inference_transforms(output_dir: str = "./out"):
-    """Return a MONAI ``Compose`` transform for full-volume MSD inference.
+def build_msd_inference_transforms():
+    """Return ``(pre_transforms, post_transforms)`` for full-volume MSD inference.
 
-    Args:
-        output_dir: Directory where ``SaveImaged`` writes the segmentation NIfTI.
+    Post-transforms invert back to original space and apply argmax, producing a
+    ``(1, D, H, W)`` integer label tensor.  Saving is handled by the caller
+    (``predict.py``) so no ``SaveImaged`` step is included here.
     """
-    test_org_transforms = Compose(
-    [
-        LoadImaged(keys="image"),
-        EnsureChannelFirstd(keys="image"),
-        Orientationd(keys=["image"], axcodes="RAS"),
-        Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode="bilinear"),
-        ScaleIntensityRanged(
-            keys=["image"],
-            a_min=-57,
-            a_max=164,
-            b_min=0.0,
-            b_max=1.0,
-            clip=True,
-        ),
-        CropForegroundd(keys=["image"], source_key="image", allow_smaller=True),
-    ]
+    pre_transforms = Compose(
+        [
+            LoadImaged(keys="image"),
+            EnsureChannelFirstd(keys="image"),
+            Orientationd(keys=["image"], axcodes="RAS"),
+            Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode="bilinear"),
+            ScaleIntensityRanged(
+                keys=["image"],
+                a_min=-57,
+                a_max=164,
+                b_min=0.0,
+                b_max=1.0,
+                clip=True,
+            ),
+            CropForegroundd(keys=["image"], source_key="image", allow_smaller=True),
+        ]
     )
     post_transforms = Compose(
-    [
-        Invertd(
-            keys="pred",
-            transform=test_org_transforms,
-            orig_keys="image",
-            meta_keys="pred_meta_dict",
-            orig_meta_keys="image_meta_dict",
-            meta_key_postfix="meta_dict",
-            nearest_interp=False,
-            to_tensor=True,
-        ),
-        AsDiscreted(keys="pred", argmax=True, to_onehot=2),
-        SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir=output_dir, output_postfix="seg", resample=False),
-    ]
+        [
+            Invertd(
+                keys="pred",
+                transform=pre_transforms,
+                orig_keys="image",
+                meta_keys="pred_meta_dict",
+                orig_meta_keys="image_meta_dict",
+                meta_key_postfix="meta_dict",
+                nearest_interp=False,
+                to_tensor=True,
+            ),
+            AsDiscreted(keys="pred", argmax=True),
+        ]
     )
-    
-    return test_org_transforms, post_transforms
+    return pre_transforms, post_transforms
 
-def build_btcv_inference_transforms(output_dir: str = "./out"):
-    """Return a MONAI ``Compose`` transform for full-volume BTCV inference.
 
-    Args:
-        output_dir: Directory where ``SaveImaged`` writes the segmentation NIfTI.
+def build_btcv_inference_transforms():
+    """Return ``(pre_transforms, post_transforms)`` for full-volume BTCV inference.
+
+    Post-transforms invert back to original space and apply argmax, producing a
+    ``(1, D, H, W)`` integer label tensor.  Saving is handled by the caller
+    (``predict.py``) so no ``SaveImaged`` step is included here.
     """
-    test_org_transforms = Compose(
-    [
-        LoadImaged(keys="image"),
-        EnsureChannelFirstd(keys="image"),
-        Orientationd(keys=["image"], axcodes="RAS"),
-        Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode="bilinear"),
-        ScaleIntensityRanged(
-            keys=["image"],
-            a_min=-175,
-            a_max=250,
-            b_min=0.0,
-            b_max=1.0,
-            clip=True,
-        ),
-        CropForegroundd(keys=["image"], source_key="image", allow_smaller=True),
-    ]
+    pre_transforms = Compose(
+        [
+            LoadImaged(keys="image"),
+            EnsureChannelFirstd(keys="image"),
+            Orientationd(keys=["image"], axcodes="RAS"),
+            Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode="bilinear"),
+            ScaleIntensityRanged(
+                keys=["image"],
+                a_min=-175,
+                a_max=250,
+                b_min=0.0,
+                b_max=1.0,
+                clip=True,
+            ),
+            CropForegroundd(keys=["image"], source_key="image", allow_smaller=True),
+        ]
     )
-
     post_transforms = Compose(
-    [
-        Invertd(
-            keys="pred",
-            transform=test_org_transforms,
-            orig_keys="image",
-            meta_keys="pred_meta_dict",
-            orig_meta_keys="image_meta_dict",
-            meta_key_postfix="meta_dict",
-            nearest_interp=False,
-            to_tensor=True,
-        ),
-        AsDiscreted(keys="pred", argmax=True, to_onehot=14),  # 13 organs + background
-        SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir=output_dir, output_postfix="seg", resample=False),
-    ]
+        [
+            Invertd(
+                keys="pred",
+                transform=pre_transforms,
+                orig_keys="image",
+                meta_keys="pred_meta_dict",
+                orig_meta_keys="image_meta_dict",
+                meta_key_postfix="meta_dict",
+                nearest_interp=False,
+                to_tensor=True,
+            ),
+            AsDiscreted(keys="pred", argmax=True),  # → (1, D, H, W) integer labels
+        ]
     )
-    return test_org_transforms, post_transforms
+    return pre_transforms, post_transforms

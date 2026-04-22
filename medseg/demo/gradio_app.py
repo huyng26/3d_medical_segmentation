@@ -1,31 +1,36 @@
-"""Gradio interface for interactive 3-D segmentation demo (Phase 6).
+"""Gradio viewer for pre-computed 3-D segmentation results (Phase 6).
+
+This module is a **pure viewer** — it does not load any model weights or run
+any inference.  All segmentation NIfTI files must have been produced
+beforehand by running ``predict.py``.
+
+Expected output layout written by ``predict.py``:
+    out/
+      btcv/
+        unet3d/        case_001_seg.nii.gz
+        attention_unet/
+        swin_unetr/
+      msd_task2/
+        unet3d/
+        ...
+      msd_task9/
+        ...
 
 UI flow:
-  1. User uploads a NIfTI file.
-  2. User selects model (unet3d | attention_unet | swin_unetr), dataset, and axis/slice.
-  3. Click "Run Segmentation" — sliding-window inference runs once; the result
-     NIfTI is written to OUT_DIR by SaveImaged (post-transform).
-  4. The saved segmentation NIfTI is loaded and the overlay is rendered.
-  5. Changing axis or slice re-renders from the saved file instantly — no
-     further inference is needed.
-
-Models are loaded once at startup to minimise per-request latency.
-Inference runs on GPU when available, CPU as fallback.
+  1. Upload the original NIfTI volume.
+  2. Select dataset / model (/ MSD task when applicable).
+  3. Click "Load segmentation" — app finds the matching pre-computed file.
+  4. Choose viewing axis and slice index to browse the overlay.
 """
 from __future__ import annotations
+
 import os
-import glob
-import torch
-import argparse
-import numpy as np
 from pathlib import Path
 from typing import Any
-import nibabel as nib
-from monai.inferers.utils import sliding_window_inference
-from medseg.models import build_model
-from monai.data import Dataset, DataLoader, decollate_batch
-from medseg.data_utils.transforms import build_msd_inference_transforms, build_btcv_inference_transforms
+
 import matplotlib.pyplot as plt
+import nibabel as nib
+import numpy as np
 import gradio as gr
 
 OUT_DIR = os.path.abspath("./out")
@@ -34,109 +39,120 @@ SUPPORTED_MODELS = ("unet3d", "attention_unet", "swin_unetr")
 SUPPORTED_DATASETS = ("btcv", "msd")
 SUPPORTED_MSD_TASKS = (2, 9)
 
-def _checkpoint_path(args: argparse.Namespace, model_name: str) -> str:
-    if args.dataset == "msd":
-        return os.path.join(args.save_dir, f"{model_name}_msd_task{args.msd_task}_best_model.pth")
-    return os.path.join(args.save_dir, f"{model_name}_{args.dataset}_best_model.pth")
 
-
-def _default_demo_args() -> argparse.Namespace:
-    # Keep demo startup simple for `python app.py` while allowing overrides later.
-    return argparse.Namespace(
-        dataset="btcv",
-        msd_task=2,
-        model_name="unet3d",
-        num_classes=14,
-        in_channels=1,
-        img_size=[96, 96, 96],
-        pretrain="",
-        save_dir="checkpoints",
-        amp=False,
-    )
-
-
-def _num_classes_for_dataset(dataset: str) -> int:
-    return 2 if dataset == "msd" else 14
-
-
-def _build_runtime_args(
-    base_args: argparse.Namespace,
-    dataset: str,
-    msd_task: int,
-    model_name: str,
-) -> argparse.Namespace:
-    runtime_args = argparse.Namespace(**vars(base_args))
-    runtime_args.dataset = dataset
-    runtime_args.msd_task = msd_task
-    runtime_args.model_name = model_name
-    runtime_args.num_classes = _num_classes_for_dataset(dataset)
-    return runtime_args
-
-
-def _available_models(base_args: argparse.Namespace, dataset: str, msd_task: int) -> list[str]:
-    available: list[str] = []
-    for model_name in SUPPORTED_MODELS:
-        runtime_args = _build_runtime_args(base_args, dataset, msd_task, model_name)
-        if os.path.exists(_checkpoint_path(runtime_args, model_name)):
-            available.append(model_name)
-    return available
-
-
-def _get_or_load_model(
-    base_args: argparse.Namespace,
-    dataset: str,
-    msd_task: int,
-    model_name: str,
-    cache: dict[tuple[str, int, str], torch.nn.Module],
-) -> tuple[torch.nn.Module, argparse.Namespace]:
-    key = (dataset, msd_task, model_name)
-    runtime_args = _build_runtime_args(base_args, dataset, msd_task, model_name)
-    if key in cache:
-        return cache[key], runtime_args
-
-    ckpt_path = _checkpoint_path(runtime_args, model_name)
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model(model_name, runtime_args)
-    state = torch.load(ckpt_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-    model.to(device)
-    model.eval()
-    cache[key] = model
-    return model, runtime_args
-
-
-def _extract_logits(outputs):
-    if isinstance(outputs, torch.Tensor):
-        return outputs
-    if isinstance(outputs, tuple):
-        return outputs[0]
-    if isinstance(outputs, dict):
-        return next(iter(outputs.values()))
-    raise TypeError(f"Unsupported model output type: {type(outputs)!r}")
-
+# ---------------------------------------------------------------------------
+# NIfTI helpers
+# ---------------------------------------------------------------------------
 
 def _resolve_uploaded_path(nifti_path: Any) -> str:
     if isinstance(nifti_path, str):
         return nifti_path
     if isinstance(nifti_path, dict) and "name" in nifti_path:
         return str(nifti_path["name"])
-    named_path = getattr(nifti_path, "name", None)
-    if named_path is not None:
-        return str(named_path)
+    named = getattr(nifti_path, "name", None)
+    if named is not None:
+        return str(named)
     raise ValueError("Invalid uploaded file. Please upload a .nii or .nii.gz file.")
 
 
 def _validate_nifti_path(path: str) -> None:
-    lower_path = path.lower()
-    if lower_path.endswith(".nii") or lower_path.endswith(".nii.gz"):
+    lower = path.lower()
+    if lower.endswith(".nii") or lower.endswith(".nii.gz"):
         return
     raise ValueError("Unsupported file type. Please upload a .nii or .nii.gz file.")
 
 
-def _slice_for_axis(volume: np.ndarray, seg: np.ndarray, axis: str, slice_idx: int):
+def _stem(path: str) -> str:
+    """Return the filename stem, stripping .nii.gz or .nii."""
+    name = Path(path).name
+    for ext in (".nii.gz", ".nii"):
+        if name.lower().endswith(ext):
+            return name[: -len(ext)]
+    return name
+
+
+def _load_nifti_volume(path: str) -> np.ndarray:
+    """Load a NIfTI file with nibabel and return a 3-D array (D, H, W)."""
+    img = nib.load(path)
+    vol = np.asarray(img.dataobj)
+    if vol.ndim == 4 and vol.shape[-1] == 1:
+        vol = vol[..., 0]
+    return vol
+
+
+def _load_seg_volume(path: str) -> np.ndarray:
+    """Load a segmentation NIfTI and return an integer label map (D, H, W).
+
+    ``predict.py`` saves integer label maps directly, so no argmax is needed.
+    The volume is (D, H, W) or occasionally (D, H, W, 1) if saved with a
+    trailing dimension.
+    """
+    img = nib.load(path)
+    arr = np.asarray(img.dataobj)
+    # Squeeze any trailing singleton dimensions.
+    while arr.ndim > 3 and arr.shape[-1] == 1:
+        arr = arr[..., 0]
+    return arr.astype(np.int16)
+
+
+# ---------------------------------------------------------------------------
+# Output-cache lookup
+# ---------------------------------------------------------------------------
+
+def _dataset_key(dataset: str, msd_task: int) -> str:
+    return "btcv" if dataset == "btcv" else f"msd_task{msd_task}"
+
+
+def _seg_path(
+    out_dir: str,
+    dataset: str,
+    model_name: str,
+    msd_task: int,
+    volume_stem: str,
+) -> str | None:
+    """Return the path to the pre-computed segmentation NIfTI, or None."""
+    ds_key = _dataset_key(dataset, msd_task)
+    candidate = os.path.join(out_dir, ds_key, model_name, f"{volume_stem}_seg.nii.gz")
+    if os.path.exists(candidate):
+        return candidate
+    # .nii fallback
+    candidate_nii = os.path.join(out_dir, ds_key, model_name, f"{volume_stem}_seg.nii")
+    if os.path.exists(candidate_nii):
+        return candidate_nii
+    return None
+
+
+def _available_models_for_cache(
+    out_dir: str,
+    dataset: str,
+    msd_task: int,
+) -> list[str]:
+    """Return model names that have at least one result in the cache."""
+    ds_key = _dataset_key(dataset, msd_task)
+    ds_dir = os.path.join(out_dir, ds_key)
+    if not os.path.isdir(ds_dir):
+        return []
+    available = []
+    for model_name in SUPPORTED_MODELS:
+        model_dir = os.path.join(ds_dir, model_name)
+        if os.path.isdir(model_dir) and any(
+            f.endswith("_seg.nii.gz") or f.endswith("_seg.nii")
+            for f in os.listdir(model_dir)
+        ):
+            available.append(model_name)
+    return available
+
+
+# ---------------------------------------------------------------------------
+# Slice helpers
+# ---------------------------------------------------------------------------
+
+def _slice_for_axis(
+    volume: np.ndarray,
+    seg: np.ndarray,
+    axis: str,
+    slice_idx: int,
+):
     if axis == "axial":
         max_idx = volume.shape[0] - 1
         idx = int(np.clip(slice_idx, 0, max_idx))
@@ -152,18 +168,8 @@ def _slice_for_axis(volume: np.ndarray, seg: np.ndarray, axis: str, slice_idx: i
     raise ValueError("axis must be one of: axial, coronal, sagittal")
 
 
-def _load_nifti_volume(path: str) -> np.ndarray:
-    """Load a NIfTI file with nibabel and return a 3-D numpy array (D, H, W)."""
-    img = nib.load(path)
-    vol = np.asarray(img.dataobj)
-    # Squeeze a trailing size-1 time/component dimension if present.
-    if vol.ndim == 4 and vol.shape[-1] == 1:
-        vol = vol[..., 0]
-    return vol
-
-
 def _uploaded_max_slice(nifti_path: Any, axis: str) -> int:
-    """Return the maximum valid slice index for *axis* by loading the raw NIfTI."""
+    """Return the maximum valid slice index for *axis* from the raw NIfTI."""
     path = _resolve_uploaded_path(nifti_path)
     _validate_nifti_path(path)
     vol = _load_nifti_volume(path)
@@ -176,157 +182,27 @@ def _uploaded_max_slice(nifti_path: Any, axis: str) -> int:
     return 0
 
 
-def _find_seg_output(input_path: str, out_dir: str) -> str | None:
-    """Locate the NIfTI segmentation file written by ``SaveImaged``.
-
-    MONAI's ``SaveImaged`` (with ``separate_folder=True``, the default) saves
-    to ``{out_dir}/{stem}/{stem}_seg.nii.gz``.  We also check the flat layout
-    ``{out_dir}/{stem}_seg.nii.gz`` as a fallback, and use glob for any
-    compression variant.
-    """
-    stem = Path(input_path).name
-    for ext in (".nii.gz", ".nii"):
-        if stem.lower().endswith(ext):
-            stem = stem[: -len(ext)]
-            break
-
-    candidates = [
-        os.path.join(out_dir, stem, f"{stem}_seg.nii.gz"),
-        os.path.join(out_dir, stem, f"{stem}_seg.nii"),
-        os.path.join(out_dir, f"{stem}_seg.nii.gz"),
-        os.path.join(out_dir, f"{stem}_seg.nii"),
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-
-    # Broader glob in case MONAI appended extra suffixes
-    pattern = os.path.join(out_dir, "**", f"{stem}_seg*")
-    matches = glob.glob(pattern, recursive=True)
-    if matches:
-        return sorted(matches)[-1]
-
-    return None
-
-
-def load_models(args: argparse.Namespace) -> dict[str, torch.nn.Module]:
-    """Pre-load all three model checkpoints into memory.
-
-    Args:
-        args: Command-line arguments.
-        checkpoint_dir: Directory containing ``unet3d.pth``,
-                        ``skip_densenet3d.pth``, and ``swin_unetr.pth``.
-
-    Returns:
-        Dict mapping model name → ``torch.nn.Module`` (eval mode).
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loaded = {}
-    for model_name in SUPPORTED_MODELS:
-        runtime_args = _build_runtime_args(args, args.dataset, args.msd_task, model_name)
-        ckpt_path = _checkpoint_path(runtime_args, model_name)
-        if not os.path.exists(ckpt_path):
-            continue
-        model = build_model(model_name, runtime_args)
-        state = torch.load(ckpt_path, map_location=device, weights_only=True)
-        model.load_state_dict(state)
-        model.to(device)
-        model.eval()
-        loaded[model_name] = model
-
-    if not loaded:
-        raise FileNotFoundError(
-            f"No checkpoints found in {args.save_dir} for dataset={args.dataset}. "
-            "Expected files like unet3d_<dataset>_best_model.pth"
-        )
-    return loaded
-
-def run_inference_to_file(
-    nifti_path: Any,
-    args: argparse.Namespace,
-    model: torch.nn.Module,
-    out_dir: str = OUT_DIR,
-) -> str:
-    """Run sliding-window inference and save the segmentation NIfTI via ``SaveImaged``.
-
-    Args:
-        nifti_path: Path to the uploaded NIfTI file.
-        args:       Runtime arguments (dataset, img_size, …).
-        model:      Pre-loaded model in eval mode.
-        out_dir:    Root directory passed to ``SaveImaged``.
-
-    Returns:
-        Absolute path to the saved segmentation NIfTI file.
-    """
-    path = _resolve_uploaded_path(nifti_path)
-    _validate_nifti_path(path)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"File not found: {path}")
-
-    infer_transforms, post_process = (
-        build_msd_inference_transforms(output_dir=out_dir)
-        if args.dataset == "msd"
-        else build_btcv_inference_transforms(output_dir=out_dir)
-    )
-    test_loader = DataLoader(
-        Dataset(data=[{"image": path}], transform=infer_transforms),
-        batch_size=1,
-        shuffle=False,
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    with torch.no_grad():
-        for batch in test_loader:
-            batch["pred"] = sliding_window_inference(
-                inputs=batch["image"].to(device),
-                roi_size=tuple(args.img_size),
-                sw_batch_size=4,
-                predictor=model,
-            )
-            for item in decollate_batch(batch):
-                post_process(item)
-
-    seg_path = _find_seg_output(path, out_dir)
-    if seg_path is None:
-        raise RuntimeError(
-            f"Inference completed but no segmentation file was found under {out_dir!r}. "
-            "Check that SaveImaged wrote successfully."
-        )
-    return seg_path
-
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
 
 def render_seg_slice(
     nifti_path: Any,
     seg_path: str,
     axis: str,
     slice_idx: int,
-) -> "plt.Figure":
-    """Load a saved segmentation NIfTI and render an overlay figure.
-
-    This function does **not** run inference — it only reads the files that
-    ``run_inference_to_file`` already wrote to disk.
+) -> plt.Figure:
+    """Load the original + segmentation NIfTI and render an overlay figure.
 
     Args:
-        nifti_path: Original input NIfTI (for the background grey-scale image).
-        seg_path:   Path to the saved segmentation NIfTI produced by inference.
-        axis:       Viewing plane — ``"axial"``, ``"sagittal"``, or ``"coronal"``.
+        nifti_path: Original input NIfTI (background greyscale image).
+        seg_path:   Pre-computed segmentation NIfTI from ``predict.py``.
+        axis:       ``"axial"``, ``"sagittal"``, or ``"coronal"``.
         slice_idx:  Index of the slice to display.
-
-    Returns:
-        A ``matplotlib.figure.Figure`` for Gradio to display.
     """
     orig_path = _resolve_uploaded_path(nifti_path)
     volume = _load_nifti_volume(orig_path)
-
-    # nibabel loads NIfTI as (D, H, W) or (D, H, W, C) — channels last.
-    # MONAI's SaveImaged writes the one-hot tensor in that same layout, so
-    # argmax along the last axis recovers the integer label map.
-    seg_img = nib.load(seg_path)
-    seg_arr = np.asarray(seg_img.dataobj)
-    if seg_arr.ndim == 4:
-        seg = np.argmax(seg_arr, axis=-1)
-    else:
-        seg = seg_arr.squeeze()
+    seg = _load_seg_volume(seg_path)
 
     vol_slice, seg_slice, used_idx, max_idx = _slice_for_axis(volume, seg, axis, slice_idx)
 
@@ -344,10 +220,17 @@ def render_seg_slice(
     return fig
 
 
-def build_interface(args: argparse.Namespace):
-    """Construct and return the ``gradio.Blocks`` interface object."""
-    model_cache: dict[tuple[str, int, str], torch.nn.Module] = {}
-    initial_models = _available_models(args, args.dataset, args.msd_task)
+# ---------------------------------------------------------------------------
+# Gradio interface
+# ---------------------------------------------------------------------------
+
+def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
+    """Construct and return the Gradio Blocks interface."""
+
+    # Seed the model dropdown from whatever is already cached.
+    initial_dataset = "btcv"
+    initial_task = 2
+    initial_models = _available_models_for_cache(out_dir, initial_dataset, initial_task)
 
     def _update_slider(nifti_file: Any, axis_name: str):
         if nifti_file is None:
@@ -363,8 +246,7 @@ def build_interface(args: argparse.Namespace):
         task = int(msd_task_value)
         if task not in SUPPORTED_MSD_TASKS:
             task = SUPPORTED_MSD_TASKS[0]
-
-        model_names = _available_models(args, dataset_name, task)
+        model_names = _available_models_for_cache(out_dir, dataset_name, task)
         if not model_names:
             model_names = list(SUPPORTED_MODELS)
         return (
@@ -376,12 +258,12 @@ def build_interface(args: argparse.Namespace):
         task = int(msd_task_value)
         if task not in SUPPORTED_MSD_TASKS:
             task = SUPPORTED_MSD_TASKS[0]
-        model_names = _available_models(args, dataset_name, task)
+        model_names = _available_models_for_cache(out_dir, dataset_name, task)
         if not model_names:
             model_names = list(SUPPORTED_MODELS)
         return gr.update(choices=model_names, value=model_names[0], interactive=True)
 
-    def _run_inference(
+    def _load_and_render(
         nifti_file,
         dataset_name,
         msd_task_value,
@@ -389,49 +271,43 @@ def build_interface(args: argparse.Namespace):
         axis_name,
         slice_value,
     ):
-        """Run inference once, save NIfTI, render the first overlay.
+        """Find the pre-computed segmentation and render the first overlay.
 
-        Returns (figure, seg_path) so the seg_path can be stored in State
-        for subsequent slice/axis re-renders.
+        Returns ``(figure, seg_path)`` so the path is stored in ``gr.State``
+        for subsequent axis/slice re-renders without hitting the filesystem again.
         """
         if nifti_file is None:
             raise gr.Error("Please upload a NIfTI volume first.")
+
+        try:
+            orig_path = _resolve_uploaded_path(nifti_file)
+            _validate_nifti_path(orig_path)
+        except ValueError as exc:
+            raise gr.Error(str(exc))
 
         task = int(msd_task_value)
         if dataset_name != "msd":
             task = SUPPORTED_MSD_TASKS[0]
 
-        try:
-            model, runtime_args = _get_or_load_model(
-                base_args=args,
-                dataset=dataset_name,
-                msd_task=task,
-                model_name=model_name,
-                cache=model_cache,
+        vol_stem = _stem(orig_path)
+        found = _seg_path(out_dir, dataset_name, model_name, task, vol_stem)
+        if found is None:
+            raise gr.Error(
+                f"No pre-computed segmentation found for volume '{vol_stem}' "
+                f"(dataset={dataset_name}, model={model_name}). "
+                "Run predict.py first."
             )
-        except FileNotFoundError as exc:
-            raise gr.Error(str(exc))
-
-        try:
-            seg_path = run_inference_to_file(
-                nifti_path=nifti_file,
-                args=runtime_args,
-                model=model,
-                out_dir=OUT_DIR,
-            )
-        except Exception as exc:
-            raise gr.Error(str(exc))
 
         fig = render_seg_slice(
             nifti_path=nifti_file,
-            seg_path=seg_path,
+            seg_path=found,
             axis=axis_name,
             slice_idx=int(slice_value),
         )
-        return fig, seg_path
+        return fig, found
 
     def _rerender_slice(nifti_file, seg_path, axis_name, slice_value):
-        """Re-render from the already-saved segmentation NIfTI — no inference."""
+        """Re-render from the cached seg path — no filesystem lookup needed."""
         if seg_path is None or nifti_file is None:
             return None
         try:
@@ -444,31 +320,32 @@ def build_interface(args: argparse.Namespace):
         except Exception as exc:
             raise gr.Error(str(exc))
 
-    with gr.Blocks(title="3D Medical Segmentation Demo") as demo:
-        gr.Markdown("## 3D Medical Segmentation Demo")
+    with gr.Blocks(title="3D Medical Segmentation Viewer") as demo:
+        gr.Markdown("## 3D Medical Segmentation Viewer")
         gr.Markdown(
-            "Upload a NIfTI file, pick a model and viewing axis, then click "
-            "**Run Segmentation**. Afterwards, adjust the axis or slice to "
-            "re-render instantly from the saved segmentation — no re-inference needed."
+            "Upload the original NIfTI volume, pick the dataset and model used "
+            "to produce the segmentation, then click **Load segmentation**. "
+            "Segmentations must be pre-computed with `predict.py`."
         )
 
-        # Stores the path to the segmentation NIfTI saved by SaveImaged.
         seg_path_state = gr.State(value=None)
 
         with gr.Row():
-            # Windows browsers may not match multi-part extensions like ".nii.gz"
-            # reliably. Accept ".gz" in picker; validate strict NIfTI suffix server-side.
-            nifti_input = gr.File(label="NIfTI volume", file_types=[".nii", ".gz"], type="filepath")
+            nifti_input = gr.File(
+                label="Original NIfTI volume",
+                file_types=[".nii", ".gz"],
+                type="filepath",
+            )
             dataset_input = gr.Dropdown(
                 choices=list(SUPPORTED_DATASETS),
-                value=args.dataset,
+                value=initial_dataset,
                 label="Dataset",
             )
             msd_task_input = gr.Dropdown(
                 choices=list(SUPPORTED_MSD_TASKS),
-                value=args.msd_task,
+                value=initial_task,
                 label="MSD Task",
-                visible=args.dataset == "msd",
+                visible=False,
             )
             model_input = gr.Dropdown(
                 choices=initial_models if initial_models else list(SUPPORTED_MODELS),
@@ -482,11 +359,14 @@ def build_interface(args: argparse.Namespace):
                 value="axial",
                 label="Viewing axis",
             )
-            slice_input = gr.Slider(minimum=0, maximum=256, value=128, step=1, label="Slice index")
+            slice_input = gr.Slider(
+                minimum=0, maximum=256, value=128, step=1, label="Slice index"
+            )
 
-        run_button = gr.Button("Run segmentation", variant="primary")
+        load_button = gr.Button("Load segmentation", variant="primary")
         out_plot = gr.Plot(label="Segmentation overlay")
 
+        # --- event wiring ---
         dataset_input.change(
             _update_dataset_controls,
             inputs=[dataset_input, msd_task_input],
@@ -497,17 +377,28 @@ def build_interface(args: argparse.Namespace):
             inputs=[dataset_input, msd_task_input],
             outputs=[model_input],
         )
-        nifti_input.change(_update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input])
-        axis_input.change(_update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input])
+        nifti_input.change(
+            _update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input]
+        )
+        axis_input.change(
+            _update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input]
+        )
 
-        # Run inference once; store the saved seg path in State.
-        run_button.click(
-            _run_inference,
-            inputs=[nifti_input, dataset_input, msd_task_input, model_input, axis_input, slice_input],
+        # Load once, store seg path in State.
+        load_button.click(
+            _load_and_render,
+            inputs=[
+                nifti_input,
+                dataset_input,
+                msd_task_input,
+                model_input,
+                axis_input,
+                slice_input,
+            ],
             outputs=[out_plot, seg_path_state],
         )
 
-        # Re-render from the saved NIfTI without re-running inference.
+        # Re-render from the stored path — no file-system lookup.
         axis_input.change(
             _rerender_slice,
             inputs=[nifti_input, seg_path_state, axis_input, slice_input],
@@ -522,11 +413,9 @@ def build_interface(args: argparse.Namespace):
     return demo
 
 
-def launch(checkpoint_dir: str = "checkpoints", share: bool = False) -> None:
-    """Load models and launch the Gradio server."""
-    args = _default_demo_args()
-    args.save_dir = checkpoint_dir
-    demo = build_interface(args)
+def launch(out_dir: str = OUT_DIR, share: bool = False) -> None:
+    """Build the interface and launch the Gradio server."""
+    demo = build_interface(out_dir=out_dir)
     demo.launch(share=share)
 
 

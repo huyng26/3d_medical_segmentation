@@ -185,7 +185,7 @@ def build_msd_test_transforms():
     )
     return val_transforms
 
-def build_inference_transforms():
+def build_msd_inference_transforms():
     """Return a MONAI ``Compose`` transform for full-volume inference."""
     test_org_transforms = Compose(
     [
@@ -204,11 +204,6 @@ def build_inference_transforms():
         CropForegroundd(keys=["image"], source_key="image", allow_smaller=True),
     ]
     )
-    
-    return test_org_transforms
-
-def build_postprocess_transforms():
-    test_org_transforms = build_inference_transforms()
     post_transforms = Compose(
     [
         Invertd(
@@ -225,4 +220,42 @@ def build_postprocess_transforms():
         SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir="../out", output_postfix="seg", resample=False),
     ]
     )
-    return post_transforms
+    
+    return test_org_transforms, post_transforms
+
+def build_btcv_inference_transforms():
+    test_org_transforms = Compose(
+    [
+        LoadImaged(keys="image"),
+        EnsureChannelFirstd(keys="image"),
+        Orientationd(keys=["image"], axcodes="RAS"),
+        Spacingd(keys=["image"], pixdim=(1.5, 1.5, 2.0), mode="bilinear"),
+        ScaleIntensityRanged(
+            keys=["image"],
+            a_min=-175,
+            a_max=250,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True,
+        ),
+        CropForegroundd(keys=["image"], source_key="image", allow_smaller=True),
+    ]
+    )
+
+    post_transforms = Compose(
+    [
+        Invertd(
+            keys="pred",
+            transform=test_org_transforms,
+            orig_keys="image",
+            meta_keys="pred_meta_dict",
+            orig_meta_keys="image_meta_dict",
+            meta_key_postfix="meta_dict",
+            nearest_interp=False,
+            to_tensor=True,
+        ),
+        AsDiscreted(keys="pred", argmax=True, to_onehot=14),  # 13 organs + background
+        SaveImaged(keys="pred", meta_keys="pred_meta_dict", output_dir="./out", output_postfix="seg", resample=False),
+    ]
+    )
+    return test_org_transforms, post_transforms

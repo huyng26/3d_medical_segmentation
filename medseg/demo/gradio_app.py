@@ -17,14 +17,17 @@ import numpy as np
 from typing import Any
 from monai.inferers.utils import sliding_window_inference
 from medseg.models import build_model
-from medseg.data_utils.transforms import build_inference_transforms
+from monai.transforms import LoadImage
+from monai.data import Dataset, DataLoader,  decollate_batch
+from monai.handlers.utils import from_engine
+from medseg.data_utils.transforms import build_msd_inference_transforms, build_btcv_inference_transforms
 import matplotlib.pyplot as plt
 import gradio as gr
 
 SUPPORTED_MODELS = ("unet3d", "attention_unet", "swin_unetr")
 SUPPORTED_DATASETS = ("btcv", "msd")
 SUPPORTED_MSD_TASKS = (2, 9)
-
+loader = LoadImage()
 
 def _checkpoint_path(args: argparse.Namespace, model_name: str) -> str:
     if args.dataset == "msd":
@@ -144,10 +147,10 @@ def _slice_for_axis(volume: np.ndarray, seg: np.ndarray, axis: str, slice_idx: i
     raise ValueError("axis must be one of: axial, coronal, sagittal")
 
 
-def _uploaded_max_slice(nifti_path: Any, axis: str) -> int:
+def _uploaded_max_slice(args, nifti_path: Any, axis: str) -> int:
     path = _resolve_uploaded_path(nifti_path)
     _validate_nifti_path(path)
-    infer_transforms = build_inference_transforms()
+    infer_transforms, post_process = build_msd_inference_transforms() if args.dataset == "msd" else build_btcv_inference_transforms()
     sample_obj = infer_transforms({"image": path})
     if not isinstance(sample_obj, dict) or "image" not in sample_obj:
         return 0
@@ -220,39 +223,52 @@ def segment_nifti(
     if not os.path.exists(path):
         raise FileNotFoundError(f"File not found: {path}")
 
-    infer_transforms = build_inference_transforms()
-    sample_obj = infer_transforms({"image": path})
-    if not isinstance(sample_obj, dict) or "image" not in sample_obj:
-        raise ValueError("Inference transforms must return a dict with key 'image'.")
-    image = sample_obj["image"]
-    if not isinstance(image, torch.Tensor):
-        image = torch.as_tensor(image)
-
-    device = next(model.parameters()).device
-    image = image.unsqueeze(0).to(device)
+    infer_transforms, post_process = build_msd_inference_transforms() if args.dataset == "msd" else build_btcv_inference_transforms()
+    test_data = [{'image': path}]
+    test_org_ds = Dataset(data=test_data, transform=infer_transforms) 
+    test_loader = DataLoader(test_org_ds, batch_size=1, shuffle=False) 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with torch.no_grad():
-        probs = sliding_window_inference(
-            inputs=image,
-            roi_size=tuple(args.img_size),
-            sw_batch_size=1,
-            predictor=model,
-            overlap=0.25,
-        )
-        probs = _extract_logits(probs)
-        pred = torch.argmax(probs, dim=1).squeeze(0).detach().cpu().numpy()
+        for test_data in test_loader:
+            image = test_data['image'].to(device)
+            test_data['pred'] = sliding_window_inference(
+                inputs=image,
+                roi_size=tuple(args.img_size),
+                sw_batch_size=4,
+                predictor=model,
+            )
+            test_data = [post_process(i) for i in decollate_batch(test_data)]
 
-    image_np = image.squeeze(0).squeeze(0).detach().cpu().numpy()
-    img_slice, seg_slice, idx, max_idx = _slice_for_axis(image_np, pred, axis, slice_idx)
+            test_output = from_engine(["pred"])(test_data)
+            if not isinstance(test_output, list) or not test_output:
+                raise RuntimeError("Post-processing produced no prediction output.")
 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.imshow(np.rot90(img_slice), cmap="gray")
-    seg_mask = np.ma.masked_where(seg_slice <= 0, np.rot90(seg_slice))
-    ax.imshow(seg_mask, cmap="autumn", alpha=0.5, interpolation="nearest")
-    ax.set_title(f"{os.path.basename(path)} | {axis} slice {idx}/{max_idx}")
-    ax.axis("off")
-    fig.tight_layout()
-    return fig
+            original_image = loader(path)
+            volume = np.asarray(original_image)
+            if volume.ndim == 4 and volume.shape[0] == 1:
+                volume = volume[0]
+
+            pred_obj = test_output[0]
+            pred_tensor = pred_obj.detach().cpu() if isinstance(pred_obj, torch.Tensor) else torch.as_tensor(pred_obj)
+            seg = torch.argmax(pred_tensor, dim=0).numpy()
+
+            vol_slice, seg_slice, used_idx, max_idx = _slice_for_axis(volume, seg, axis, slice_idx)
+
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            axes[0].imshow(vol_slice, cmap="gray")
+            axes[0].set_title(f"Input ({axis}, slice {used_idx}/{max_idx})")
+            axes[0].axis("off")
+
+            seg_masked = np.ma.masked_where(seg_slice == 0, seg_slice)
+            axes[1].imshow(vol_slice, cmap="gray")
+            axes[1].imshow(seg_masked, cmap="turbo", alpha=0.45)
+            axes[1].set_title("Segmentation Overlay")
+            axes[1].axis("off")
+            fig.tight_layout()
+            return fig
+
+    raise RuntimeError("Inference did not produce any output.")
 
 
 
@@ -266,7 +282,7 @@ def build_interface(args: argparse.Namespace):
         if nifti_file is None:
             return gr.update(maximum=0, value=0)
         try:
-            max_idx = _uploaded_max_slice(nifti_file, axis_name)
+            max_idx = _uploaded_max_slice(args, nifti_file, axis_name)
         except Exception:
             max_idx = 256
         return gr.update(maximum=max_idx, value=max_idx // 2)

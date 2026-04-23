@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from medseg.models.unet3d import UNet3D
-from medseg.models.skip_densenet_3d import SkipDenseNet3D
+from medseg.models.attention_unet import AttentionUNet
 from medseg.models.swin_unetr import SwinUNETRWrapper
 
 NUM_CLASSES = 14
@@ -20,7 +20,7 @@ PATCH_SIZE = (128, 128, 64)
     "model_cls,kwargs",
     [
         (UNet3D, {"in_channels": 1, "out_channels": NUM_CLASSES}),
-        (SkipDenseNet3D, {"in_channels": 1, "out_channels": NUM_CLASSES}),
+        (AttentionUNet, {"in_channels": 1, "out_channels": NUM_CLASSES}),
         (
             SwinUNETRWrapper,
             {

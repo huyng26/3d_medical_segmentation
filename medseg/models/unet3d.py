@@ -5,14 +5,14 @@ Decoder uses trilinear upsampling or transposed convolutions (configurable).
 """
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class ConvBlock3D(nn.Module):
-    """Two consecutive Conv3d → Norm → ReLU layers."""
-
     def __init__(self, in_channels: int, out_channels: int, norm: str = "batch") -> None:
         super().__init__()
         if norm == "batch":
@@ -31,25 +31,31 @@ class ConvBlock3D(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.block(x)
 
 
 class EncoderBlock(nn.Module):
-    """Downsampling encoder stage: ConvBlock3D followed by MaxPool3d."""
-
     def __init__(self, in_channels: int, out_channels: int, norm: str = "batch") -> None:
         super().__init__()
         self.conv = ConvBlock3D(in_channels, out_channels, norm=norm)
         self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
 
-    def forward(self, x):
-        x = self.conv(x)
-        return x, self.pool(x)
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        feat = self.conv(x)
+        return feat, self.pool(feat)   # (skip, pooled)
 
 
 class DecoderBlock(nn.Module):
-    """Upsampling decoder stage with skip-connection concatenation."""
+    """Upsampling decoder stage with skip-connection concatenation.
+
+    Args:
+        in_channels:    Channels coming from the previous decoder stage.
+        skip_channels:  Channels of the encoder skip-connection.
+        out_channels:   Channels produced by this block.
+        upsample_mode:  ``"trilinear"`` (default) or ``"transposed_conv"``.
+        norm:           ``"batch"`` or ``"instance"``.
+    """
 
     def __init__(
         self,
@@ -60,6 +66,7 @@ class DecoderBlock(nn.Module):
         norm: str = "batch",
     ) -> None:
         super().__init__()
+
         if upsample_mode == "transposed_conv":
             self.up = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2)
             self.proj = nn.Identity()
@@ -72,30 +79,38 @@ class DecoderBlock(nn.Module):
                 "Expected 'trilinear' or 'transposed_conv'."
             )
 
-        self.conv = ConvBlock3D(
-            in_channels=out_channels + skip_channels,
-            out_channels=out_channels,
-            norm=norm,
-        )
+        self.conv = ConvBlock3D(out_channels + skip_channels, out_channels, norm=norm)
 
-    def forward(self, x, skip):
-        x = self.up(x)
-        x = self.proj(x)
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.proj(self.up(x))
+
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode="trilinear", align_corners=False)
+
         x = torch.cat([skip, x], dim=1)
         return self.conv(x)
 
 
 class UNet3D(nn.Module):
-    """Full 3D U-Net.
+    """3-D U-Net.
+
+    Standard encoder-decoder with skip connections between encoder and decoder
+    stages. All operations are 3-D, so the model directly processes volumetric
+    medical images.
 
     Args:
-        in_channels:    Number of input image channels (typically 1 for CT).
-        out_channels:   Number of segmentation classes.
-        features:       Feature map counts at each encoder depth.
-        norm:           Normalisation layer type — ``"batch"`` or ``"instance"``.
-        upsample_mode:  ``"trilinear"`` or ``"transposed_conv"``.
+        in_channels:   Number of input image channels (1 for CT/MRI).
+        out_channels:  Number of segmentation classes.
+        features:      Channel counts at each encoder depth.
+                       Defaults to ``[32, 64, 128, 256, 320]``.
+        norm:          Normalisation layer - ``"batch"`` or ``"instance"``.
+        upsample_mode: ``"trilinear"`` (default) or ``"transposed_conv"``.
+
+    Example::
+
+        model = UNet3D(in_channels=1, out_channels=14)
+        x = torch.randn(1, 1, 128, 128, 64)
+        logits = model(x)   # -> (1, 14, 128, 128, 64)
     """
 
     def __init__(
@@ -110,16 +125,18 @@ class UNet3D(nn.Module):
         features = features or [32, 64, 128, 256, 320]
         if len(features) < 2:
             raise ValueError("`features` must contain at least 2 values.")
+        if any(ch <= 0 for ch in features):
+            raise ValueError("`features` values must be positive integers.")
 
-        self.encoders = nn.ModuleList()
-        prev_channels = in_channels
+        self.encoders: nn.ModuleList = nn.ModuleList()
+        prev_ch = in_channels
         for out_ch in features[:-1]:
-            self.encoders.append(EncoderBlock(prev_channels, out_ch, norm=norm))
-            prev_channels = out_ch
+            self.encoders.append(EncoderBlock(prev_ch, out_ch, norm=norm))
+            prev_ch = out_ch
 
         self.bottleneck = ConvBlock3D(features[-2], features[-1], norm=norm)
 
-        self.decoders = nn.ModuleList()
+        self.decoders: nn.ModuleList = nn.ModuleList()
         dec_in = features[-1]
         for skip_ch in reversed(features[:-1]):
             self.decoders.append(
@@ -135,8 +152,16 @@ class UNet3D(nn.Module):
 
         self.head = nn.Conv3d(features[0], out_channels, kernel_size=1)
 
-    def forward(self, x):
-        skips = []
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: Input volume of shape ``(B, C, D, H, W)``.
+
+        Returns:
+            Class logits of shape ``(B, out_channels, D, H, W)``.
+        """
+        skips: list[torch.Tensor] = []
         for encoder in self.encoders:
             skip, x = encoder(x)
             skips.append(skip)
@@ -147,3 +172,47 @@ class UNet3D(nn.Module):
             x = decoder(x, skip)
 
         return self.head(x)
+
+    def load_pretrained_weights(self, pretrained_path: str) -> None:
+        """Load pretrained weights from a checkpoint file."""
+        if not os.path.exists(pretrained_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {pretrained_path}")
+
+        checkpoint = torch.load(pretrained_path, map_location="cpu")
+
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+
+        if isinstance(state_dict, dict) and state_dict and "module." in next(iter(state_dict.keys())):
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
+        if not isinstance(state_dict, dict):
+            raise TypeError(f"Unsupported checkpoint format: {type(checkpoint)}")
+
+        model_dict = self.state_dict()
+        filtered_dict = {
+            k: v
+            for k, v in state_dict.items()
+            if k in model_dict and v.shape == model_dict[k].shape
+        }
+
+        missing = set(model_dict.keys()) - set(filtered_dict.keys())
+        if missing:
+            print(f"Missing weights for: {missing}")
+
+        model_dict.update(filtered_dict)
+        self.load_state_dict(model_dict)
+
+        print(f"Loaded weights from: {pretrained_path}")
+        print(f"Loaded {len(filtered_dict)} / {len(model_dict)} weights")
+
+
+if __name__ == "__main__":
+    model = UNet3D(in_channels=1, out_channels=14)
+    x = torch.randn(1, 1, 96, 96, 96)
+    out = model(x)
+    print(out.shape)
+
+    print("Number of parameters:", sum(p.numel() for p in model.parameters()))

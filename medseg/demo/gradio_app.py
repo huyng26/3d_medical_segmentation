@@ -1,25 +1,26 @@
-"""Gradio viewer for pre-computed 3-D segmentation results (Phase 6).
+"""Gradio viewer for 3-D medical segmentation labels.
 
-This module is a **pure viewer** — it does not load any model weights or run
-any inference.  All segmentation NIfTI files must have been produced
-beforehand by running ``predict.py``.
+This module is a **pure viewer** - it does not load any model weights or run
+any inference.  It overlays the dataset label NIfTI that matches the uploaded
+image filename.
 
-Expected output layout written by ``predict.py``:
-    out/
-      btcv/
-        unet3d/        case_001_seg.nii.gz
-        attention_unet/
-        swin_unetr/
-      msd_task2/
-        unet3d/
-        ...
-      msd_task9/
-        ...
+Expected label layout:
+    data/
+      BTCV/
+        imagesTs/img0003.nii.gz
+        labelsTs/img0003.nii.gz
+      MSD/
+        Task02_Heart/
+          imagesTs/...
+          labelsTs/...
+        Task09_Spleen/
+          imagesTs/...
+          labelsTs/...
 
 UI flow:
   1. Upload the original NIfTI volume.
-  2. Select dataset / model (/ MSD task when applicable).
-  3. Click "Load segmentation" — app finds the matching pre-computed file.
+  2. Select dataset (/ MSD task when applicable).
+  3. Click "Load label" - app finds the matching label by filename.
   4. Choose viewing axis and slice index to browse the overlay.
 """
 from __future__ import annotations
@@ -33,12 +34,14 @@ import nibabel as nib
 import numpy as np
 import gradio as gr
 
-OUT_DIR = os.path.abspath("./out")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+OUT_DIR = str(PROJECT_ROOT / "out")
 
-SUPPORTED_MODELS = ("unet3d", "attention_unet", "swin_unetr")
 SUPPORTED_DATASETS = ("btcv", "msd")
 SUPPORTED_MSD_TASKS = (2, 9)
-
+LABEL_ROOT_BTCV_DIR = str(PROJECT_ROOT / "data" / "BTCV")
+LABEL_ROOT_MSD_DIR = str(PROJECT_ROOT / "data" / "MSD")
+LABEL_SPLITS = ("labelsTs", "labelsTr")
 
 # ---------------------------------------------------------------------------
 # NIfTI helpers
@@ -80,67 +83,64 @@ def _load_nifti_volume(path: str) -> np.ndarray:
     return vol
 
 
-def _load_seg_volume(path: str) -> np.ndarray:
+def _load_label_nifti_volume(path: str) -> np.ndarray:
     """Load a segmentation NIfTI and return an integer label map (D, H, W).
 
-    ``predict.py`` saves integer label maps directly, so no argmax is needed.
-    The volume is (D, H, W) or occasionally (D, H, W, 1) if saved with a
-    trailing dimension.
+    This is for loading the original label NIfTIs that come with the datasets,
+    which may be one-hot encoded (D, H, W, C) and need argmax to get class labels.
     """
     img = nib.load(path)
     arr = np.asarray(img.dataobj)
-    # Squeeze any trailing singleton dimensions.
-    while arr.ndim > 3 and arr.shape[-1] == 1:
-        arr = arr[..., 0]
+    if arr.ndim == 4:
+        # Assume one-hot encoding in the last dimension; convert to label map.
+        arr = np.argmax(arr, axis=-1)
     return arr.astype(np.int16)
 
-
 # ---------------------------------------------------------------------------
-# Output-cache lookup
+# Dataset label lookup
 # ---------------------------------------------------------------------------
 
-def _dataset_key(dataset: str, msd_task: int) -> str:
-    return "btcv" if dataset == "btcv" else f"msd_task{msd_task}"
+
+def _msd_task_dir(msd_task: int) -> str:
+    if msd_task == 2:
+        return "Task02_Heart"
+    if msd_task == 9:
+        return "Task09_Spleen"
+    raise ValueError(f"Unsupported MSD task: {msd_task}")
 
 
-def _seg_path(
-    out_dir: str,
+def _dataset_label_root(
     dataset: str,
-    model_name: str,
     msd_task: int,
-    volume_stem: str,
+) -> str:
+    if dataset == "btcv":
+        return LABEL_ROOT_BTCV_DIR
+    if dataset == "msd":
+        return os.path.join(LABEL_ROOT_MSD_DIR, _msd_task_dir(msd_task))
+    raise ValueError(f"Unsupported dataset: {dataset}")
+
+
+def _label_path(
+    dataset: str,
+    msd_task: int,
+    uploaded_path: str,
 ) -> str | None:
-    """Return the path to the pre-computed segmentation NIfTI, or None."""
-    ds_key = _dataset_key(dataset, msd_task)
-    candidate = os.path.join(out_dir, ds_key, model_name, f"{volume_stem}_seg.nii.gz")
-    if os.path.exists(candidate):
-        return candidate
-    # .nii fallback
-    candidate_nii = os.path.join(out_dir, ds_key, model_name, f"{volume_stem}_seg.nii")
-    if os.path.exists(candidate_nii):
-        return candidate_nii
+    """Return the matching dataset label path for the uploaded image, or None."""
+    root = _dataset_label_root(dataset, msd_task)
+    uploaded_name = Path(uploaded_path).name
+    uploaded_stem = _stem(uploaded_path)
+
+    candidates: list[str] = []
+    for split in LABEL_SPLITS:
+        label_dir = os.path.join(root, split)
+        candidates.append(os.path.join(label_dir, uploaded_name))
+        candidates.append(os.path.join(label_dir, f"{uploaded_stem}.nii.gz"))
+        candidates.append(os.path.join(label_dir, f"{uploaded_stem}.nii"))
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
     return None
-
-
-def _available_models_for_cache(
-    out_dir: str,
-    dataset: str,
-    msd_task: int,
-) -> list[str]:
-    """Return model names that have at least one result in the cache."""
-    ds_key = _dataset_key(dataset, msd_task)
-    ds_dir = os.path.join(out_dir, ds_key)
-    if not os.path.isdir(ds_dir):
-        return []
-    available = []
-    for model_name in SUPPORTED_MODELS:
-        model_dir = os.path.join(ds_dir, model_name)
-        if os.path.isdir(model_dir) and any(
-            f.endswith("_seg.nii.gz") or f.endswith("_seg.nii")
-            for f in os.listdir(model_dir)
-        ):
-            available.append(model_name)
-    return available
 
 
 # ---------------------------------------------------------------------------
@@ -192,17 +192,17 @@ def render_seg_slice(
     axis: str,
     slice_idx: int,
 ) -> plt.Figure:
-    """Load the original + segmentation NIfTI and render an overlay figure.
+    """Load the original + label NIfTI and render an overlay figure.
 
     Args:
         nifti_path: Original input NIfTI (background greyscale image).
-        seg_path:   Pre-computed segmentation NIfTI from ``predict.py``.
+        seg_path:   Matching dataset label NIfTI.
         axis:       ``"axial"``, ``"sagittal"``, or ``"coronal"``.
         slice_idx:  Index of the slice to display.
     """
     orig_path = _resolve_uploaded_path(nifti_path)
     volume = _load_nifti_volume(orig_path)
-    seg = _load_seg_volume(seg_path)
+    seg = _load_label_nifti_volume(seg_path)
 
     vol_slice, seg_slice, used_idx, max_idx = _slice_for_axis(volume, seg, axis, slice_idx)
 
@@ -214,7 +214,7 @@ def render_seg_slice(
     seg_masked = np.ma.masked_where(seg_slice == 0, seg_slice)
     axes[1].imshow(vol_slice, cmap="gray")
     axes[1].imshow(seg_masked, cmap="turbo", alpha=0.45)
-    axes[1].set_title("Segmentation Overlay")
+    axes[1].set_title("Label Overlay")
     axes[1].axis("off")
     fig.tight_layout()
     return fig
@@ -227,10 +227,8 @@ def render_seg_slice(
 def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
     """Construct and return the Gradio Blocks interface."""
 
-    # Seed the model dropdown from whatever is already cached.
     initial_dataset = "btcv"
     initial_task = 2
-    initial_models = _available_models_for_cache(out_dir, initial_dataset, initial_task)
 
     def _update_slider(nifti_file: Any, axis_name: str):
         if nifti_file is None:
@@ -246,34 +244,18 @@ def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
         task = int(msd_task_value)
         if task not in SUPPORTED_MSD_TASKS:
             task = SUPPORTED_MSD_TASKS[0]
-        model_names = _available_models_for_cache(out_dir, dataset_name, task)
-        if not model_names:
-            model_names = list(SUPPORTED_MODELS)
-        return (
-            gr.update(visible=is_msd, value=task),
-            gr.update(choices=model_names, value=model_names[0], interactive=True),
-        )
-
-    def _update_models_for_task(dataset_name: str, msd_task_value: int):
-        task = int(msd_task_value)
-        if task not in SUPPORTED_MSD_TASKS:
-            task = SUPPORTED_MSD_TASKS[0]
-        model_names = _available_models_for_cache(out_dir, dataset_name, task)
-        if not model_names:
-            model_names = list(SUPPORTED_MODELS)
-        return gr.update(choices=model_names, value=model_names[0], interactive=True)
+        return gr.update(visible=is_msd, value=task)
 
     def _load_and_render(
         nifti_file,
         dataset_name,
         msd_task_value,
-        model_name,
         axis_name,
         slice_value,
     ):
-        """Find the pre-computed segmentation and render the first overlay.
+        """Find the matching label and render the first overlay.
 
-        Returns ``(figure, seg_path)`` so the path is stored in ``gr.State``
+        Returns ``(figure, label_path)`` so the path is stored in ``gr.State``
         for subsequent axis/slice re-renders without hitting the filesystem again.
         """
         if nifti_file is None:
@@ -290,12 +272,11 @@ def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
             task = SUPPORTED_MSD_TASKS[0]
 
         vol_stem = _stem(orig_path)
-        found = _seg_path(out_dir, dataset_name, model_name, task, vol_stem)
+        found = _label_path(dataset_name, task, orig_path)
         if found is None:
             raise gr.Error(
-                f"No pre-computed segmentation found for volume '{vol_stem}' "
-                f"(dataset={dataset_name}, model={model_name}). "
-                "Run predict.py first."
+                f"No label found for volume '{vol_stem}' "
+                f"(dataset={dataset_name}, expected filename={Path(orig_path).name})."
             )
 
         fig = render_seg_slice(
@@ -307,7 +288,7 @@ def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
         return fig, found
 
     def _rerender_slice(nifti_file, seg_path, axis_name, slice_value):
-        """Re-render from the cached seg path — no filesystem lookup needed."""
+        """Re-render from the cached label path without a filesystem lookup."""
         if seg_path is None or nifti_file is None:
             return None
         try:
@@ -323,9 +304,9 @@ def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
     with gr.Blocks(title="3D Medical Segmentation Viewer") as demo:
         gr.Markdown("## 3D Medical Segmentation Viewer")
         gr.Markdown(
-            "Upload the original NIfTI volume, pick the dataset and model used "
-            "to produce the segmentation, then click **Load segmentation**. "
-            "Segmentations must be pre-computed with `predict.py`."
+            "Upload the original NIfTI volume, pick the dataset, then click "
+            "**Load label**. The label is loaded from the matching dataset "
+            "label folder using the uploaded filename."
         )
 
         seg_path_state = gr.State(value=None)
@@ -347,11 +328,6 @@ def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
                 label="MSD Task",
                 visible=False,
             )
-            model_input = gr.Dropdown(
-                choices=initial_models if initial_models else list(SUPPORTED_MODELS),
-                value=(initial_models[0] if initial_models else SUPPORTED_MODELS[0]),
-                label="Model",
-            )
 
         with gr.Row():
             axis_input = gr.Radio(
@@ -363,19 +339,14 @@ def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
                 minimum=0, maximum=256, value=128, step=1, label="Slice index"
             )
 
-        load_button = gr.Button("Load segmentation", variant="primary")
-        out_plot = gr.Plot(label="Segmentation overlay")
+        load_button = gr.Button("Load label", variant="primary")
+        out_plot = gr.Plot(label="Label overlay")
 
         # --- event wiring ---
         dataset_input.change(
             _update_dataset_controls,
             inputs=[dataset_input, msd_task_input],
-            outputs=[msd_task_input, model_input],
-        )
-        msd_task_input.change(
-            _update_models_for_task,
-            inputs=[dataset_input, msd_task_input],
-            outputs=[model_input],
+            outputs=[msd_task_input],
         )
         nifti_input.change(
             _update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input]
@@ -384,21 +355,20 @@ def build_interface(out_dir: str = OUT_DIR) -> gr.Blocks:
             _update_slider, inputs=[nifti_input, axis_input], outputs=[slice_input]
         )
 
-        # Load once, store seg path in State.
+        # Load once, store the label path in State.
         load_button.click(
             _load_and_render,
             inputs=[
                 nifti_input,
                 dataset_input,
                 msd_task_input,
-                model_input,
                 axis_input,
                 slice_input,
             ],
             outputs=[out_plot, seg_path_state],
         )
 
-        # Re-render from the stored path — no file-system lookup.
+        # Re-render from the stored path without another filesystem lookup.
         axis_input.change(
             _rerender_slice,
             inputs=[nifti_input, seg_path_state, axis_input, slice_input],
